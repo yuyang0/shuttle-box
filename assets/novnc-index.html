@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>shuttle-box desktop</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+  // Forward to noVNC, keeping whatever query the caller supplied.
+  //   resize=scale  (default) fits the picture to the window; the X screen is untouched
+  //   resize=off             1:1 with scrollbars
+  // noVNC also accepts resize=remote (ask the server to resize the X screen), but this
+  // image's Xvnc drops the connection on SetDesktopSize, so it is not the default.
+  (function () {
+    var q = new URLSearchParams(window.location.search);
+    if (!q.has('autoconnect')) q.set('autoconnect', '1');
+    if (!q.has('resize')) q.set('resize', 'scale');
+    if (!q.has('reconnect')) q.set('reconnect', '1');
+    if (!q.has('reconnect_delay')) q.set('reconnect_delay', '1000');
+    window.location.replace('vnc.html?' + q.toString());
+  })();
+</script>
+</head>
+<body>
+<p>Opening the desktop… <a href="vnc.html">continue</a></p>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# make 产物
+/timeline.json
+/shot.png
+*.log
+
+# 本地密钥/环境
+.env
+.env.*
+
+# 临时文件
+*.tmp
+.DS_Store
+
+# profile 备份
+/backups/

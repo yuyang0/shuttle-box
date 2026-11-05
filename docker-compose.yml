@@ -1,0 +1,46 @@
+services:
+  box:
+    build:
+      context: .
+      args:
+        SHUTTLE_VERSION: "0.1.38"
+        # 国内构建时可换成任意 Ubuntu 镜像源，省下大半 apt 时间
+        # APT_MIRROR: "http://mirrors.ustc.edu.cn/ubuntu"
+    image: shuttle-box:0.1.38
+    container_name: shuttle-box
+    # Host networking so Firefox can reach a proxy that listens on the host's
+    # 127.0.0.1 (a bridge container's 127.0.0.1 is its own). There are no mapped
+    # ports in this mode: noVNC listens on the host at NOVNC_PORT directly.
+    network_mode: host
+    # Firefox 的内容进程沙箱同样要建用户命名空间，Docker 默认 seccomp 会挡住；放开后
+    # 浏览器可以带着自己的沙箱运行。不需要 --cap-add=SYS_ADMIN。
+    security_opt:
+      - seccomp=unconfined
+    shm_size: "2gb"          # browsers want /dev/shm larger than the 64 MB default
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - SHUTTLE_BASE_URL=${SHUTTLE_BASE_URL:-}
+      - SHUTTLE_SAFE_APPS=${SHUTTLE_SAFE_APPS:-}
+      - SCREEN_GEOMETRY=${SCREEN_GEOMETRY:-1280x800}
+      # 刻意不用 TZ/LANG 这两个名字：compose 的 ${VAR:-default} 会取运行 compose 那个
+      # shell 的环境变量，宿主机上的 LANG=C.UTF-8 会覆盖掉这里的默认值
+      - TZ=${CONTAINER_TZ:-Asia/Shanghai}
+      - LANG=${CONTAINER_LANG:-zh_CN.UTF-8}
+      - LC_ALL=${CONTAINER_LANG:-zh_CN.UTF-8}
+      - BROWSER_ACCEPT_LANG=${BROWSER_ACCEPT_LANG:-zh-CN,zh,en}
+      - VNC_PASSWORD=${VNC_PASSWORD:-}
+      # noVNC: http://localhost:16080/
+      - NOVNC_PORT=${NOVNC_PORT:-16080}
+      # 127.0.0.1 keeps the viewer on this machine; set it to 0.0.0.0 (or empty)
+      # when another machine has to open it
+      - NOVNC_BIND=${NOVNC_BIND-127.0.0.1}
+      # browser proxy: Firefox ignores http_proxy, the launcher writes it into the profile
+      - BROWSER_PROXY=${BROWSER_PROXY-http://127.0.0.1:7890}
+      - BROWSER_NO_PROXY=${BROWSER_NO_PROXY:-}
+    volumes:
+      - box-home:/home/box
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+volumes:
+  box-home:

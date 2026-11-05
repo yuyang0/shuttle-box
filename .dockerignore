@@ -1,0 +1,8 @@
+.git
+.gitignore
+*.md
+docker-compose.yml
+*.png
+backups/
+timeline.json
+shot.png
