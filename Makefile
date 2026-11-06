@@ -3,10 +3,11 @@ SHELL := /bin/bash
 .ONESHELL:
 .DEFAULT_GOAL := help
 
-# 本地构建用和 registry 相同的引用，拉到和构建出来的镜像同名，compose 只有一种写法
+# 本地运行默认用 registry 上的 latest；构建时会额外打一个带 git 描述的 tag 便于追溯
 IMAGE               ?= ghcr.io/yuyang0/shuttle-box
-TAG                 ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+TAG                 ?= latest
 REF                 := $(IMAGE):$(TAG)
+BUILD_TAG           ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 CONTAINER           ?= shuttle-box
 # 跟着 Dockerfile 的 ARG 走，避免两处版本各自漂移
 SHUTTLE_VERSION     ?= $(shell sed -n "s/^ARG SHUTTLE_VERSION=//p" Dockerfile)
@@ -93,7 +94,7 @@ help:
 	@printf '%s\n' "$$HELP_TEXT" || true
 
 build:
-	docker build --network=host $(BUILD_ARGS) -t $(REF) -t $(IMAGE):latest .
+	docker build --network=host $(BUILD_ARGS) -t $(REF) -t $(IMAGE):$(BUILD_TAG) .
 
 up:
 	IMAGE=$(IMAGE) TAG=$(TAG) docker compose up -d
