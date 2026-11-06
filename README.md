@@ -20,29 +20,30 @@ cd shuttle-box
 echo "SHUTTLE_MCP_TOKEN=$(openssl rand -hex 24)" > .env
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env
 
-# 2. 构建。国内默认走 USTC apt 源和本机 7890 代理；
-#    没有这层代理时用 make build PROXY= APT_MIRROR= 走官方源直连
-make build
+# 2. 直接拉 CI 发布的镜像。包若仍为私有，先登录：
+#    echo "$PAT" | docker login ghcr.io -u <用户名> --password-stdin   # PAT 需 read:packages
+make pull TAG=latest
+make up   TAG=latest
 
-# 3. 启动并等到桌面就绪
-make up
-
-# 4. 看画面（端口只绑回环，跨机用 ssh -L 16080:127.0.0.1:16080 <host>）
+# 3. 看画面（端口只绑回环，跨机用 ssh -L 16080:127.0.0.1:16080 <host>）
 xdg-open http://127.0.0.1:16080/
 
-# 5. 接入 agent
+# 4. 接入 agent
 make mcp-url     # 打印 MCP URL 和 Authorization 头
 make mcp-test    # 握手冒烟
 ```
 
-不想自己构建，就直接用 CI 发布的镜像（包未公开时先 `docker login ghcr.io`）：
+固定版本而不是浮动 `latest`：`make pull TAG=v0.1.0 && make up TAG=v0.1.0`。
+
+自己构建（改了代码，或 registry 上没有你要的版本）：
 
 ```bash
-make pull IMAGE=ghcr.io/yuyang0/shuttle-box TAG=v0.1.0
-make up   IMAGE=ghcr.io/yuyang0/shuttle-box TAG=v0.1.0
+# make build                     # 国内默认走 USTC apt 源 + 本机 7890 代理
+# make build PROXY= APT_MIRROR=  # 没有这层代理时，走官方源直连
+# make up
+#
+# 本地 tag 默认来自 git describe，会随提交变动；要稳定名字就 make build TAG=dev
 ```
-
-本地镜像的 tag 默认来自 `git describe`，会随提交变动；想要一个稳定的本地名字就 `make build TAG=dev`，之后 `make up TAG=dev`。
 
 ## 已验证
 
@@ -108,7 +109,7 @@ bin/mcp-drive.py shot out.png
 - 构建参数全部留空——runner 上 archive.ubuntu.com、Mozilla 源和 GitHub release 都直连，不需要 `APT_MIRROR`，也不需要任何代理
 - 推送后会把镜像拉回来跑一次冒烟测试（`shuttle --version`）
 
-仓库是私有的，所以包也是私有的，拉取要先登录：
+仓库是公开的，但 ghcr 包的可见性独立维护；包为私有时拉取要先登录：
 
 ```bash
 echo "$GITHUB_PAT" | docker login ghcr.io -u <你的用户名> --password-stdin   # PAT 需 read:packages
