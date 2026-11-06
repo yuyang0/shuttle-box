@@ -58,8 +58,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
-            # latest tracks main only: a tag build must not move it.
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # `latest` is left to metadata-action's own rule: a branch push and a tag
+            # that points at the branch tip both move it, a tag cut from an older
+            # commit does not. Add `flavor: latest=false` if that is not wanted.
 
       - name: Build and push
         id: build
