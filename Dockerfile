@@ -57,6 +57,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates curl gnupg jq less procps tini xz-utils \
         locales tzdata \
         dbus dbus-x11 at-spi2-core libatk-adaptor \
+        python3-pyatspi \
         xfce4 xfce4-terminal xfce4-taskmanager mousepad xterm \
         x11-utils x11-xserver-utils xauth xdg-utils xdg-user-dirs \
         fonts-dejavu-core fonts-liberation fonts-noto-cjk \
