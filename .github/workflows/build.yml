@@ -52,6 +52,9 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
+            # The git tag verbatim, so any tag name maps to an image tag of the
+            # same name; the semver rules below add the v-less forms as well.
+            type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
