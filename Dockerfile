@@ -16,7 +16,7 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=
-ARG SHUTTLE_VERSION=0.1.38
+ARG SHUTTLE_VERSION=0.1.40
 # Point at a mirror when github.com is slow: e.g.
 #   --build-arg SHUTTLE_RELEASE_BASE=https://ghfast.top/https://github.com/loomhand/shuttle/releases/download
 ARG SHUTTLE_RELEASE_BASE=https://github.com/loomhand/shuttle/releases/download
@@ -33,6 +33,8 @@ ENV LANG=zh_CN.UTF-8 \
     VNC_PORT=5901 \
     NOVNC_PORT=16080 \
     NOVNC_BIND=127.0.0.1 \
+    MCP_HTTP_BIND=127.0.0.1 \
+    MCP_HTTP_PORT=8765 \
     NO_AT_BRIDGE=0 \
     GTK_MODULES=atk-bridge \
     QT_ACCESSIBILITY=1
@@ -182,7 +184,7 @@ WORKDIR /home/${USER_NAME}
 USER ${USER_NAME}
 
 # noVNC
-EXPOSE 16080
+EXPOSE 16080 8765
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD test -f "$HOME/.cache/box/ready" \

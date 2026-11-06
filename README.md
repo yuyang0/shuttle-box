@@ -5,8 +5,8 @@
 - 桌面：XFCE4 跑在 TigerVNC 的 `Xvnc` 上（`:1`，默认 1280×800），没有 Wayland
 - 网页看画面：noVNC + websockify，`http://<host>:16080/`（自动连接 + 缩放适配）
 - 浏览器：Mozilla Firefox（官方 deb 源，Ubuntu 自带的是 snap 占位装不了），有 AT-SPI 树
-- 驱动层：[shuttle](https://github.com/loomhand/shuttle) v0.1.38，装于 `/opt/loomhand/shuttle`，`shuttle` 在 PATH
-- 接入方式：`docker exec -i <容器> shuttle mcp`（stdio，由 `bin/shuttle-mcp.sh` 包装）
+- 驱动层：[shuttle](https://github.com/loomhand/shuttle) v0.1.40，装于 `/opt/loomhand/shuttle`，`shuttle` 在 PATH
+- 接入方式：MCP over HTTP，`http://127.0.0.1:8765/mcp`（容器内 `shuttle mcp --http`，Bearer token 鉴权）
 
 ## 已验证
 
@@ -17,8 +17,9 @@
 | Firefox 无障碍树 | 可读：`desk find`/`desk press` 能命中并点击页面按钮 |
 | `desk key` + `desk type` 真实输入 | 输入 `https://example.com` 并回车，页面成功加载 |
 | `desk shot` | 1920×1080 PNG |
-| `docker exec -i ... shuttle mcp` | initialize（shuttle 0.1.38 / 协议 2025-06-18）、tools/list（8 个工具）、tools/call 均正常 |
-| 容器健康检查 | `healthy`（desk.sock 存在 + noVNC 200） |
+| `POST http://127.0.0.1:8765/mcp` | 无 token 返回 401；带 Bearer 时 initialize（shuttle 0.1.40 / 协议 2025-06-18）、tools/list（8 个工具）、`gui_plan` 均正常 |
+| 容器重建后重连 | 不需要任何手工操作，下一次 MCP 调用直接成功 |
+| 容器健康检查 | `healthy`（就绪标记 + noVNC 200） |
 
 ## 常用命令（Makefile）
 
@@ -58,6 +59,32 @@ bin/mcp-drive.py tools
 bin/mcp-drive.py open-url https://example.com
 bin/mcp-drive.py shot out.png
 ```
+
+## CI 与镜像仓库
+
+`.github/workflows/build.yml` 在 GitHub 的 runner 上构建并推到 GitHub Container Registry：
+
+- 触发：推 `main`、打 `v*` tag、PR（只构建不推）、手动 `workflow_dispatch`、以及每周一次的定时构建（跟进 base image 和 apt 更新）
+- tag：`latest` 与分支名（main）、`sha-<短哈希>`、打 tag 时还有 `1.2.3` 和 `1.2`
+- 缓存：`type=gha`，跨构建复用 apt / pip / 镜像层
+- 构建参数全部留空——runner 上 archive.ubuntu.com、Mozilla 源和 GitHub release 都直连，不需要 `APT_MIRROR`，也不需要任何代理
+- 推送后会把镜像拉回来跑一次冒烟测试（`shuttle --version`）
+
+仓库是私有的，所以包也是私有的，拉取要先登录：
+
+```bash
+echo "$GITHUB_PAT" | docker login ghcr.io -u <你的用户名> --password-stdin   # PAT 需 read:packages
+docker pull ghcr.io/<owner>/shuttle-box:latest
+```
+
+用 CI 的镜像替换本地构建：
+
+```bash
+make pull IMAGE=ghcr.io/<owner>/shuttle-box TAG=latest
+make up   IMAGE=ghcr.io/<owner>/shuttle-box TAG=latest
+```
+
+`make up` / `make recreate` 会把 `IMAGE`、`TAG` 透传给 compose。
 
 ## 构建
 
@@ -219,43 +246,26 @@ noVNC 的 Scaling Mode 三项对应关系：Local Scaling = `resize=scale`（默
 
 `resize=remote` 那条路已按最乐观的方式试过：显式给 Xvnc 加了 `-AcceptSetDesktopSize 1`，并用裸 RFB 客户端发过结构合法的 22 字节 SetDesktopSize（screen id 用 0 和 1 都试了），服务端都是静默断开、帧缓冲不变。要用这个方法得换支持 SetDesktopSize 的 X server。
 
-## 让 agent 接入（默认：stdio over docker exec）
+## 让 agent 接入（MCP over HTTP）
 
-`shuttle mcp` 本身就是 stdio JSON-RPC，`docker exec -i` 把它桥到宿主机，不需要额外代理、也不开端口。每个 agent 会话一个 `mcp` 进程，它们都连到容器内同一个 `shuttle serve`，由它统一持有桌面。
+容器里 `start-desktop.sh` 起了 `shuttle mcp --http 127.0.0.1:8765`，宿主机与容器共享网络，所以客户端直接连 `http://127.0.0.1:8765/mcp`。端点强制要求 bearer token：compose 从 `.env` 的 `SHUTTLE_MCP_TOKEN` 注入容器，客户端带同一个值。
 
-### 容器不需要手工启动
+```bash
+$ make mcp-url          # 打印 URL 和 Authorization 头
+$ make mcp-test         # 握手冒烟测试
+```
 
-`docker exec` 只能作用于**正在运行**的容器，容器没跑时客户端会拿到 `container ... is not running`。三种做法，按省心程度排序：
-
-1. **交给 MCP 客户端**：命令指向 `bin/shuttle-mcp.sh`（下文推荐用法）。它按需处理三件事——容器不存在就用仓库里的 `docker-compose.yml` 建、存在但停止就 `docker start`、然后等就绪标记出现再 exec `shuttle mcp`。实测：容器已在跑时约 0.7s 转手；停止状态 1.7s 拉起并完成一次调用；完全不存在时 2.2s 从零到返回结果。两个客户端同时首次调用会用 `flock` 串行化，不会撞车。
-2. **交给重启策略**：`docker compose up -d`（compose 里已设 `restart: unless-stopped`），之后只要 docker 守护进程在，容器就一直在，连 `docker start` 都不会发生。
-3. **自己保证**：直接用 `docker exec -i shuttle-box shuttle mcp`，容器没起就失败。
-
-注册 MCP 本身不需要容器在跑：`claude mcp add` 只是写配置，连接发生在第一次真正调用工具时。
-
-就绪标记是 `/home/box/.cache/box/ready`：容器每次启动先删掉它，所有进程起来后才写入。不要用 `desk.sock` 是否存在判断就绪——那个 socket 文件在容器可写层里跨重启残留，会骗过 `test -S`，于是 `shuttle mcp` 撞上僵尸 socket 后自己拉起一个拿不到 D-Bus 会话的 daemon，报 `connect the session bus: ... No such file or directory`。
-
-包装脚本认这些环境变量：`SHUTTLE_CONTAINER`（默认 `shuttle-box`）、`SHUTTLE_COMPOSE_FILE`（默认仓库根的 `docker-compose.yml`）、`SHUTTLE_READY_PATH`、`SHUTTLE_START_TIMEOUT`（默认 45s）。
+为什么默认 HTTP 而不是 `docker exec -i ... shuttle mcp`：stdio 桥的子进程随容器一起死，容器重建（`make recreate`、镜像升级）后客户端手里留一根断管，表现为 `stdio process closed`，要手工禁用/启用一次服务器才能恢复。HTTP 没有这个问题——容器重建后下一次调用直接成功，客户端只是重试一个请求。
 
 ### 客户端配置
 
-Claude Code（推荐上面的包装脚本，容器停了会自动拉起）：
+DSH：MCP 管理器里 `type = http`、`url = http://127.0.0.1:8765/mcp`、请求头 `Authorization: Bearer <token>`。也可以用 `PUT /mcp-manager/api/servers/<id>` 直接改，改完立即生效、不用重启 DSH。
+
+Claude Code：
 
 ```bash
-claude mcp add shuttle -- /path/to/box/bin/shuttle-mcp.sh
-```
-
-不想要自动拉起，就直接走 docker：
-
-```bash
-claude mcp add shuttle -- docker exec -i shuttle-box shuttle mcp
-```
-
-Codex（`~/.codex/config.toml`）：
-
-```toml
-[mcp_servers.shuttle]
-command = "/path/to/box/bin/shuttle-mcp.sh"
+claude mcp add --transport http shuttle http://127.0.0.1:8765/mcp \
+  --header "Authorization: Bearer $SHUTTLE_MCP_TOKEN"
 ```
 
 Cursor（`~/.cursor/mcp.json`）：
@@ -264,31 +274,40 @@ Cursor（`~/.cursor/mcp.json`）：
 {
   "mcpServers": {
     "shuttle": {
-      "command": "/path/to/box/bin/shuttle-mcp.sh"
+      "url": "http://127.0.0.1:8765/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
     }
   }
 }
 ```
 
-客户端不在 docker 宿主机上时，让 docker CLI 远程连过去即可，例如在这些配置里给 `docker` 带上 `-H ssh://user@host`，或直接设 `DOCKER_HOST=ssh://user@host`。
+其它支持 Streamable HTTP 的客户端同理：URL + 一个 `Authorization` 头。
 
-## 需要 HTTP 接入时
+### 容器要一直在
 
-镜像只提供 stdio（`docker exec -i <容器> shuttle mcp`）。如果客户端既不能执行 `docker`，也不能走 SSH，可以在**宿主机**上临时套一层 HTTP，不用改镜像：
+HTTP 模式没有“按需拉起”的余地：容器没跑，连接就是失败。compose 里已设 `restart: unless-stopped`，只要 docker 守护进程在，容器就在。
 
-```bash
-npx -y supergateway --stdio "docker exec -i shuttle-box shuttle mcp" \
-  --outputTransport streamableHttp --port 8080 --host 127.0.0.1
-```
+### 仍然想用 stdio
 
-客户端填 `http://<host>:8080/mcp`。加 `--apiKey <key>` 让请求必须带 `Authorization: Bearer <key>`。
-
-远程机器更简单的是走 SSH，不额外开端口：
+`bin/shuttle-mcp.sh` 保留着，适合两种情况：客户端只会起命令（没有 HTTP 支持），或者需要“容器不在就自动建起来”。它按需处理三件事——容器不存在就用仓库里的 `docker-compose.yml` 建、存在但停止就 `docker start`、然后等就绪标记出现再 `docker exec -i ... shuttle mcp`。实测：容器已在跑时约 0.7s 转手；停止状态 1.7s 拉起并完成一次调用；完全不存在时 2.2s 从零到返回结果。
 
 ```bash
-# MCP 客户端里就是这条命令
-ssh <host> docker exec -i shuttle-box shuttle mcp
+claude mcp add shuttle -- /path/to/box/bin/shuttle-mcp.sh
 ```
+
+就绪标记是 `/home/box/.cache/box/ready`：容器每次启动先删掉它，所有进程起来后才写入。不要用 `desk.sock` 是否存在判断就绪——那个 socket 文件在容器可写层里跨重启残留，会骗过 `test -S`，于是 `shuttle mcp` 撞上僵尸 socket 后自己拉起一个拿不到 D-Bus 会话的 daemon，报 `connect the session bus: ... No such file or directory`。
+
+包装脚本认这些环境变量：`SHUTTLE_CONTAINER`、`SHUTTLE_COMPOSE_FILE`、`SHUTTLE_READY_PATH`、`SHUTTLE_START_TIMEOUT`（默认 45s）。
+
+### 客户端不在宿主机上
+
+保持默认 `MCP_HTTP_BIND=127.0.0.1` 时只能本机访问，跨机用 SSH 转发即可，不必把端口暴露出去：
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 user@host
+```
+
+确实要对局域网开放时设 `MCP_HTTP_BIND=0.0.0.0` 并换掉 token——`SHUTTLE_MCP_TOKEN` 是唯一凭证，且链路是明文 HTTP。
 
 ## 模型配置
 
@@ -330,6 +349,7 @@ shuttle 会真的操作桌面上的程序，这里的边界就是容器本身。
 | `SHUTTLE_SAFE_APPS` | 空（不限） | 应用白名单，逗号分隔，例如 `SHUTTLE_SAFE_APPS=firefox-bin` |
 | `SHUTTLE_DESK_INPUT` | `foreground` | `background` / `auto` 在 Linux 上会退化成 foreground |
 | `VNC_PASSWORD` | 空 | 设了就启用 VNC 密码（noVNC 登录时同样要求） |
+| `SHUTTLE_MCP_TOKEN` | 空 | MCP HTTP 端点的唯一凭证；空值时容器内不启动该端点，并记录一行 skipped |
 
 其余：
 
@@ -342,7 +362,7 @@ shuttle 会真的操作桌面上的程序，这里的边界就是容器本身。
 | `/home/box/.cache/box/ready` | 启动完成标记：全部进程起来后才写入，MCP 包装脚本据此判断就绪 |
 | `/home/box/.cache/loomhand/shuttle/desk.sock` | shuttle daemon 的 desk 套接字 |
 | `/home/box/.config/loomhand/shuttle/config.toml` | shuttle 配置（0600） |
-| `/home/box/.cache/box/logs/` | `supervisor.log`、`xvnc.log`、`xfce.log`、`shuttle-serve.log`、`novnc.log`（有 HTTP 桥时还有 `mcp-http.log`） |
+| `/home/box/.cache/box/logs/` | `supervisor.log`、`xvnc.log`、`xfce.log`、`shuttle-serve.log`、`mcp-http.log`、`novnc.log` |
 | `/opt/loomhand/shuttle/` | shuttle 程序、`cua-driver`、内置 Node、runtime |
 | `/usr/share/novnc` | noVNC 1.7（上游 tarball，非发行版包） |
 | `/opt/websockify` | websockify 的 venv（去掉发行版带来的 numpy/nodejs 依赖链） |

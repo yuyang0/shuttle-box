@@ -6,7 +6,7 @@ services:
         SHUTTLE_VERSION: "0.1.38"
         # 国内构建时可换成任意 Ubuntu 镜像源，省下大半 apt 时间
         # APT_MIRROR: "http://mirrors.ustc.edu.cn/ubuntu"
-    image: shuttle-box:0.1.38
+    image: ${IMAGE:-shuttle-box}:${TAG:-0.1.40}
     container_name: shuttle-box
     # Host networking so Firefox can reach a proxy that listens on the host's
     # 127.0.0.1 (a bridge container's 127.0.0.1 is its own). There are no mapped
@@ -19,6 +19,9 @@ services:
     shm_size: "2gb"          # browsers want /dev/shm larger than the 64 MB default
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - SHUTTLE_MCP_TOKEN=${SHUTTLE_MCP_TOKEN:-}
+      - MCP_HTTP_PORT=${MCP_HTTP_PORT:-8765}
+      - MCP_HTTP_BIND=${MCP_HTTP_BIND:-127.0.0.1}
       - SHUTTLE_BASE_URL=${SHUTTLE_BASE_URL:-}
       - SHUTTLE_SAFE_APPS=${SHUTTLE_SAFE_APPS:-}
       - SCREEN_GEOMETRY=${SCREEN_GEOMETRY:-1280x800}

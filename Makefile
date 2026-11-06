@@ -4,7 +4,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 IMAGE               ?= shuttle-box
-TAG                 ?= 0.1.38
+TAG                 ?= 0.1.40
 REF                 := $(IMAGE):$(TAG)
 CONTAINER           ?= shuttle-box
 SHUTTLE_VERSION     ?= 0.1.38
@@ -37,6 +37,7 @@ endif
 URL                 ?= https://www.baidu.com
 GEOMETRY            ?= 1600x1200
 NOVNC_PORT          ?= 16080
+MCP_HTTP_PORT       ?= 8765
 
 .PHONY: help build build-http up down restart recreate wait-ready logs logs-raw status shell \
         tools mcp-test screen windows browser shot timeline resize stop backup restore \
@@ -59,7 +60,8 @@ shuttle-box
 
   驱动（都走 MCP，容器没起会自动拉起）
     make tools                列出 MCP 工具
-    make mcp-test             initialize + tools/list 冒烟测试
+    make mcp-test             MCP over HTTP 握手冒烟测试
+    make mcp-url              打印 MCP 端点与 Authorization 头
     make browser              打开 Firefox 并访问 $(URL)
     make screen               当前桌面尺寸
     make windows              当前窗口列表
@@ -90,8 +92,12 @@ build:
 	docker build --network=host $(BUILD_ARGS) -t $(REF) .
 
 up:
-	docker compose up -d
+	IMAGE=$(IMAGE) TAG=$(TAG) docker compose up -d
 	$(MAKE) wait-ready
+
+# 用 CI 推到 ghcr 的镜像替换本地构建（默认拉私有包，先 docker login ghcr.io）
+pull:
+	docker pull $(IMAGE):$(TAG)
 
 wait-ready:
 	@echo -n "等待桌面就绪"
@@ -109,7 +115,7 @@ down:
 restart: recreate
 
 recreate:
-	docker compose up -d --force-recreate
+	IMAGE=$(IMAGE) TAG=$(TAG) docker compose up -d --force-recreate
 	$(MAKE) wait-ready
 
 stop:
@@ -134,12 +140,17 @@ tools:
 	@bin/mcp-drive.py tools
 
 mcp-test:
-	@printf '%s\n' \
-	  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"make","version":"0"}}}' \
-	  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-	  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-	  | bin/shuttle-mcp.sh 2>/dev/null \
-	  | python3 -c 'import json,sys; [print("initialize:", m["result"]["serverInfo"]) if m.get("id")==1 else print("tools:", ", ".join(t["name"] for t in m["result"]["tools"])) for m in map(json.loads, filter(str.strip, sys.stdin))]'
+	@TOKEN=$$(grep '^SHUTTLE_MCP_TOKEN=' .env | cut -d= -f2); \
+	[ -n "$$TOKEN" ] || { echo "SHUTTLE_MCP_TOKEN 未设置（写入 .env 后 docker compose up -d）"; exit 1; }; \
+	resp=$$(curl -s -m 10 -X POST "http://127.0.0.1:$(MCP_HTTP_PORT)/mcp" \
+	    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+	    -H "Authorization: Bearer $$TOKEN" \
+	    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"make","version":"0"}}}'); \
+	printf '%s' "$$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('  ', d['result']['serverInfo'])"
+
+mcp-url:
+	@printf 'url:    http://127.0.0.1:%s/mcp\nheader: Authorization: Bearer %s\n' \
+	    "$(MCP_HTTP_PORT)" "$$(grep '^SHUTTLE_MCP_TOKEN=' .env | cut -d= -f2)"
 
 browser:
 	@bin/mcp-drive.py open-url $(URL)
