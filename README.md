@@ -12,6 +12,21 @@
 
 宿主机只需要 Docker（含 compose v2）；容器自带 X 和 VNC，宿主机不需要图形环境。
 
+### 一条命令
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/yuyang0/shuttle-box/main/quickstart.sh
+bash quickstart.sh
+```
+
+脚本会自己生成 compose 文件和 `.env`（MCP token 随机生成、权限 600），拉取 `ghcr.io/yuyang0/shuttle-box:latest`，启动容器并等到桌面就绪，最后把 noVNC 地址、MCP URL、`Authorization` 头和 Claude Code 的注册命令打印出来。不需要 clone 仓库，也不需要 make。
+
+可用环境变量覆盖：`TAG`（默认 `latest`）、`IMAGE`、`HOME_DIR`（默认 `~/.local/share/shuttle-box`）、`CONTAINER`、`NOVNC_PORT`、`MCP_PORT`、`SCREEN_GEOMETRY`、`OPENROUTER_API_KEY`。要同时跑第二个实例时，`DISPLAY` 和 `VNC_PORT` 必须一起改（例如 `DISPLAY=:2 VNC_PORT=5902 NOVNC_PORT=16090 MCP_PORT=18765`）。
+
+### 手动分步
+
+想自己控制每一步：
+
 ```bash
 git clone https://github.com/yuyang0/shuttle-box.git
 cd shuttle-box
@@ -20,8 +35,11 @@ cd shuttle-box
 echo "SHUTTLE_MCP_TOKEN=$(openssl rand -hex 24)" > .env
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env
 
-# 2. 直接拉 CI 发布的镜像。包若仍为私有，先登录：
-#    echo "$PAT" | docker login ghcr.io -u <用户名> --password-stdin   # PAT 需 read:packages
+# 2. 用镜像。默认直接拉 CI 发布的（公开，无需登录）；
+#    想自己构建就把下面三行注释打开，同时把 make pull / make up 注释掉
+# make build                     # 国内默认走 USTC apt 源 + 本机 7890 代理
+# make build PROXY= APT_MIRROR=  # 没有这层代理时，走官方源直连
+# make up
 make pull TAG=latest
 make up   TAG=latest
 
@@ -35,15 +53,7 @@ make mcp-test    # 握手冒烟
 
 固定版本而不是浮动 `latest`：`make pull TAG=v0.1.0 && make up TAG=v0.1.0`。
 
-自己构建（改了代码，或 registry 上没有你要的版本）：
-
-```bash
-# make build                     # 国内默认走 USTC apt 源 + 本机 7890 代理
-# make build PROXY= APT_MIRROR=  # 没有这层代理时，走官方源直连
-# make up
-#
-# 本地 tag 默认来自 git describe，会随提交变动；要稳定名字就 make build TAG=dev
-```
+自己构建时注意：本地 tag 默认来自 `git describe`，会随提交变动；要一个稳定的名字就 `make build TAG=dev`，之后 `make up TAG=dev`。
 
 ## 已验证
 
@@ -109,11 +119,10 @@ bin/mcp-drive.py shot out.png
 - 构建参数全部留空——runner 上 archive.ubuntu.com、Mozilla 源和 GitHub release 都直连，不需要 `APT_MIRROR`，也不需要任何代理
 - 推送后会把镜像拉回来跑一次冒烟测试（`shuttle --version`）
 
-仓库是公开的，但 ghcr 包的可见性独立维护；包为私有时拉取要先登录：
+镜像公开，无需登录即可拉取：
 
 ```bash
-echo "$GITHUB_PAT" | docker login ghcr.io -u <你的用户名> --password-stdin   # PAT 需 read:packages
-docker pull ghcr.io/<owner>/shuttle-box:latest
+docker pull ghcr.io/yuyang0/shuttle-box:latest
 ```
 
 用 CI 的镜像替换本地构建：
