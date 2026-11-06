@@ -6,7 +6,7 @@ services:
         SHUTTLE_VERSION: "0.1.38"
         # 国内构建时可换成任意 Ubuntu 镜像源，省下大半 apt 时间
         # APT_MIRROR: "http://mirrors.ustc.edu.cn/ubuntu"
-    image: ${IMAGE:-shuttle-box}:${TAG:-0.1.40}
+    image: ${IMAGE:-ghcr.io/yuyang0/shuttle-box}:${TAG:-latest}
     container_name: shuttle-box
     # Host networking so Firefox can reach a proxy that listens on the host's
     # 127.0.0.1 (a bridge container's 127.0.0.1 is its own). There are no mapped

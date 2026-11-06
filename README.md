@@ -44,7 +44,9 @@ make help            # 列出所有目标与可覆盖变量
 | `make clean` | 删容器，**保留卷**（登录态不丢） |
 | `make clean-volume FORCE=1` | 连卷删，会先自动备份 |
 
-可覆盖变量：`IMAGE` `TAG` `CONTAINER` `APT_MIRROR` `PROXY` `SHUTTLE_VERSION` `URL` `GEOMETRY`。例如：
+可覆盖变量：`IMAGE` `TAG` `CONTAINER` `APT_MIRROR` `PROXY` `SHUTTLE_VERSION` `URL` `GEOMETRY`。
+
+镜像名默认 `ghcr.io/yuyang0/shuttle-box`，和 CI 推到 registry 的引用完全一致；`TAG` 默认取 `git describe --tags --always --dirty`，所以本地构建出来的名字就是 `:v0.1.0`（工作区脏则带 `-dirty`）。`make build` 同时打一个 `:latest`，这样直接 `docker compose up` 也能用。`SHUTTLE_VERSION` 从 Dockerfile 的 `ARG` 读取，不需要在两处同步。例如：
 
 ```bash
 make build TAG=dev PROXY=            # 无代理、不同 tag

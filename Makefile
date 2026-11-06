@@ -3,11 +3,13 @@ SHELL := /bin/bash
 .ONESHELL:
 .DEFAULT_GOAL := help
 
-IMAGE               ?= shuttle-box
-TAG                 ?= 0.1.40
+# 本地构建用和 registry 相同的引用，拉到和构建出来的镜像同名，compose 只有一种写法
+IMAGE               ?= ghcr.io/yuyang0/shuttle-box
+TAG                 ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 REF                 := $(IMAGE):$(TAG)
 CONTAINER           ?= shuttle-box
-SHUTTLE_VERSION     ?= 0.1.38
+# 跟着 Dockerfile 的 ARG 走，避免两处版本各自漂移
+SHUTTLE_VERSION     ?= $(shell sed -n "s/^ARG SHUTTLE_VERSION=//p" Dockerfile)
 
 # 国内网络两个瓶颈：apt 走镜像，GitHub（shuttle release）走本机代理。
 # 代理只监听 127.0.0.1，所以构建固定用 --network=host；PROXY= 可整体关掉。
@@ -19,8 +21,10 @@ NO_PROXY_LIST       ?= localhost,127.0.0.1,$(APT_HOST)
 
 SHUTTLE_RELEASE_BASE ?=
 
-BUILD_ARGS := --build-arg APT_MIRROR=$(APT_MIRROR) \
-              --build-arg SHUTTLE_VERSION=$(SHUTTLE_VERSION)
+BUILD_ARGS := --build-arg APT_MIRROR=$(APT_MIRROR)
+ifneq ($(strip $(SHUTTLE_VERSION)),)
+BUILD_ARGS += --build-arg SHUTTLE_VERSION=$(SHUTTLE_VERSION)
+endif
 ifneq ($(strip $(SHUTTLE_RELEASE_BASE)),)
 BUILD_ARGS += --build-arg SHUTTLE_RELEASE_BASE=$(SHUTTLE_RELEASE_BASE)
 endif
@@ -89,7 +93,7 @@ help:
 	@printf '%s\n' "$$HELP_TEXT" || true
 
 build:
-	docker build --network=host $(BUILD_ARGS) -t $(REF) .
+	docker build --network=host $(BUILD_ARGS) -t $(REF) -t $(IMAGE):latest .
 
 up:
 	IMAGE=$(IMAGE) TAG=$(TAG) docker compose up -d
