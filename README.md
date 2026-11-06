@@ -8,6 +8,42 @@
 - 驱动层：[shuttle](https://github.com/loomhand/shuttle) v0.1.40，装于 `/opt/loomhand/shuttle`，`shuttle` 在 PATH
 - 接入方式：MCP over HTTP，`http://127.0.0.1:8765/mcp`（容器内 `shuttle mcp --http`，Bearer token 鉴权）
 
+## Quickstart
+
+宿主机只需要 Docker（含 compose v2）；容器自带 X 和 VNC，宿主机不需要图形环境。
+
+```bash
+git clone https://github.com/yuyang0/shuttle-box.git
+cd shuttle-box
+
+# 1. 必填：MCP 端点的 bearer token。可选项：模型 key，只影响 gui_plan / script_run
+echo "SHUTTLE_MCP_TOKEN=$(openssl rand -hex 24)" > .env
+echo "OPENROUTER_API_KEY=sk-or-..." >> .env
+
+# 2. 构建。国内默认走 USTC apt 源和本机 7890 代理；
+#    没有这层代理时用 make build PROXY= APT_MIRROR= 走官方源直连
+make build
+
+# 3. 启动并等到桌面就绪
+make up
+
+# 4. 看画面（端口只绑回环，跨机用 ssh -L 16080:127.0.0.1:16080 <host>）
+xdg-open http://127.0.0.1:16080/
+
+# 5. 接入 agent
+make mcp-url     # 打印 MCP URL 和 Authorization 头
+make mcp-test    # 握手冒烟
+```
+
+不想自己构建，就直接用 CI 发布的镜像（包未公开时先 `docker login ghcr.io`）：
+
+```bash
+make pull IMAGE=ghcr.io/yuyang0/shuttle-box TAG=v0.1.0
+make up   IMAGE=ghcr.io/yuyang0/shuttle-box TAG=v0.1.0
+```
+
+本地镜像的 tag 默认来自 `git describe`，会随提交变动；想要一个稳定的本地名字就 `make build TAG=dev`，之后 `make up TAG=dev`。
+
 ## 已验证
 
 | 项 | 结果 |
