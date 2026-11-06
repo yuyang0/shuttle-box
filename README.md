@@ -64,8 +64,8 @@ bin/mcp-drive.py shot out.png
 
 `.github/workflows/build.yml` 在 GitHub 的 runner 上构建并推到 GitHub Container Registry：
 
-- 触发：推 `main`、打 `v*` tag、PR（只构建不推）、手动 `workflow_dispatch`、以及每周一次的定时构建（跟进 base image 和 apt 更新）
-- tag：`latest` 与分支名（main）、`sha-<短哈希>`、打 tag 时还有 `1.2.3` 和 `1.2`
+- 触发：**只有打 tag**（任意 tag 名）和手动 `workflow_dispatch`；往 `main` 提交不构建，所以仓库里只有被主动标记的版本才会有镜像
+- 镜像 tag：git tag 原样（`v1.2.3` → `v1.2.3`），semver tag 额外有 `1.2.3` 和 `1.2`，另加 `sha-<短哈希>`；`latest` 由 metadata-action 自动维护
 - 缓存：`type=gha`，跨构建复用 apt / pip / 镜像层
 - 构建参数全部留空——runner 上 archive.ubuntu.com、Mozilla 源和 GitHub release 都直连，不需要 `APT_MIRROR`，也不需要任何代理
 - 推送后会把镜像拉回来跑一次冒烟测试（`shuttle --version`）
