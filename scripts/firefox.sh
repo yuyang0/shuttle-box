@@ -18,8 +18,12 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
 fi
 
 mkdir -p "$PROFILE_DIR"
-# A stale lock left by a killed instance makes Firefox refuse to start.
-rm -f "$PROFILE_DIR/lock" "$PROFILE_DIR/.parentlock"
+# A stale lock left by a killed instance makes Firefox refuse to start. Remove it only when no
+# instance is running: clearing it under a live instance lets a second one share the profile,
+# and the two then rewrite cookies.sqlite under each other (an X login was lost that way).
+if ! pgrep -x firefox-bin >/dev/null 2>&1; then
+    rm -f "$PROFILE_DIR/lock" "$PROFILE_DIR/.parentlock"
+fi
 
 
 proxy="${BROWSER_PROXY:-}"

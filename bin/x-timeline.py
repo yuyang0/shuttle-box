@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 """Collect X timelines through Firefox's accessibility tree.
 
-Reads the visible posts (author, time, text, engagement) from the AT-SPI tree, scrolling a
-few times to gather more. No CDP and no JS injection: this is the same path an agent takes
-through shuttle.
+Always the same path: make sure Firefox is running, make sure an x.com tab is the active one,
+click Home in the site's navigation, then read the timeline - optionally after selecting a tab
+such as Following. No URL to pass, no CDP and no JS injection: this is the accessibility tree an
+agent drives through shuttle.
 
 Examples
-    # what is on screen right now
-    bin/x-timeline.py
-
-    # navigate first, then scrape
-    bin/x-timeline.py --open https://x.com/home --tab Following
-
-    # several pages, comma separated, one tab each, human-readable output
-    bin/x-timeline.py --open https://x.com/home,https://x.com/home \
-        --tab Following,Investment --format md
-
-    # heavier scrape, structured JSON on stdout
-    bin/x-timeline.py --open https://x.com/home --tab Following --screens 8 > feed.json
+    bin/x-timeline.py                          # Home, whatever tab it shows
+    bin/x-timeline.py --tab Following          # Home, then the Following tab
+    bin/x-timeline.py --tab Following,Investment --links --format md
+    bin/x-timeline.py --screens 8 > feed.json
 """
 import argparse
 import json
@@ -70,37 +63,31 @@ def read_links():
     script = pathlib.Path(__file__).with_name("x-links.py")
     if not script.exists():
         print(f"warning: {script} is missing", file=sys.stderr)
-        return []
+        return {}
     proc = subprocess.run(
         ["docker", "exec", "-i", CONTAINER, "python3", "-"],
         input=script.read_text(), capture_output=True, text=True,
     )
     if proc.returncode != 0:
         print(f"warning: link reader failed: {proc.stderr.strip()[:200]}", file=sys.stderr)
-        return []
+        return {}
     try:
-        return json.loads(proc.stdout).get("posts", [])
+        posts = json.loads(proc.stdout).get("posts", [])
     except json.JSONDecodeError:
         print("warning: link reader returned no JSON", file=sys.stderr)
-        return []
+        return {}
+    return {p["name"]: p["permalink"] for p in posts if p.get("permalink")}
 
 
-def attach_links(posts, resolved):
-    """Match each collected post to its AT-SPI node: exact name first, then handle."""
-    by_name = {r.get("name"): r.get("permalink") for r in resolved if r.get("permalink")}
-    by_handle = {}
-    for r in resolved:
-        permalink = r.get("permalink")
-        if not permalink:
-            continue
-        parts = permalink.split("/")
-        if len(parts) > 3:
-            by_handle.setdefault(parts[3].lower(), permalink)
+def attach_links(posts, by_name):
+    """Attach the permalink of the node with the same accessible name, and nothing else.
+
+    No fallback by handle: one author usually has several posts in a scrape, so guessing would
+    attach someone else's post rather than admit the miss.
+    """
     matched = 0
     for post in posts:
         url = by_name.get(post.get("_name"))
-        if url is None and post.get("handle"):
-            url = by_handle.get(post["handle"].lower())
         if url:
             post["url"] = url
             matched += 1
@@ -108,17 +95,202 @@ def attach_links(posts, resolved):
     return matched
 
 
-def firefox_window(needle=None):
+# Firefox shows a tab's title, and an x.com tab always ends with the site name.
+X_TAB = re.compile(r"/ X$")
+TAB = re.compile(r'^- tab "(.*)" \[id=([^\]]+)\]$')
+START_URL = "https://x.com/home"
+
+
+def firefox_windows(needle=None):
+    found = []
     for win in desk("windows"):
-        if "firefox" not in str(win.get("app", "")):
+        if "firefox" not in str(win.get("app", "")).lower():
             continue
         title = win.get("title") or ""
-        if needle is None or needle.lower() in title.lower():
+        if needle and needle.lower() not in title.lower():
+            continue
+        found.append(win)
+    return found
+
+
+def is_x_tab(name):
+    return bool(name) and bool(X_TAB.search(name))
+
+
+def window_title_of(pid):
+    for win in firefox_windows():
+        if str(win.get("pid")) == str(pid):
+            return win.get("title")
+    return None
+
+
+def active_tab_is(name, title):
+    """Firefox titles its window "<tab title> — Mozilla Firefox"."""
+    return title == f"{name} — Mozilla Firefox"
+
+
+def tabs_of(title):
+    snap = desk("snapshot", f"window={title}", "text=true", "max_chars=12000")
+    tabs = []
+    for line in (snap.get("text") or "").splitlines():
+        match = TAB.match(line.strip())
+        if match:
+            tabs.append((match.group(1), match.group(2)))
+    return tabs
+
+
+def wait_tab_active(name, timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        win = firefox_windows()
+        if win and active_tab_is(name, win[0].get("title") or ""):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def firefox_running():
+    """A live process may have no window yet; launching then would start a second instance."""
+    proc = subprocess.run(["docker", "exec", CONTAINER, "pgrep", "-x", "firefox-bin"],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+def ensure_firefox(needle=None, timeout=60):
+    """Reuse a running Firefox, launching one on x.com only when none is alive."""
+    wins = firefox_windows(needle)
+    if wins:
+        return wins[0]["title"]
+
+    deadline = time.time() + timeout
+    if firefox_running():
+        while time.time() < deadline:
+            wins = firefox_windows(needle)
+            if wins:
+                return wins[0]["title"]
+            time.sleep(1)
+        raise RuntimeError("Firefox is running but has no window")
+
+    desk("launch", "app=firefox", f'args=["{START_URL}"]')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        wins = firefox_windows(needle)
+        if wins:
+            time.sleep(5)      # let the page load before ensure_x_tab judges the tabs
+            return wins[0]["title"]
+        time.sleep(1)
+    raise RuntimeError("Firefox did not start")
+
+
+def ensure_x_tab(title, timeout=40):
+    """Make an x.com tab the active one, opening one when the window has none."""
+    for name, node in tabs_of(title):
+        if not is_x_tab(name):
+            continue
+        if active_tab_is(name, title):
             return title
-    raise RuntimeError("no matching Firefox window")
+        desk("focus", f"window={title}")
+        desk("act", f"id={node}", "action=click")
+        if wait_tab_active(name):
+            return firefox_windows()[0]["title"]
+        print(f"warning: could not switch to tab {name!r}", file=sys.stderr)
+        return title
+
+    print(f"no x.com tab, opening {START_URL}", file=sys.stderr)
+    desk("focus", f"window={title}")
+    desk("key", f"window={title}", "keys=ctrl+t")
+    time.sleep(1.5)
+    desk("type", f"window={title}", f"text={START_URL}")
+    desk("key", f"window={title}", "keys=Return")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for name, node in tabs_of(firefox_windows()[0]["title"]):
+            if is_x_tab(name):
+                if not active_tab_is(name, firefox_windows()[0]["title"]):
+                    desk("act", f"id={node}", "action=click")
+                    wait_tab_active(name)
+                return firefox_windows()[0]["title"]
+        time.sleep(1)
+    raise RuntimeError(f"no x.com tab after opening {START_URL}")
+
+
+HOME_TITLES = ("Home / X", "首页 / X")
+
+
+def click_home(title, timeout=30):
+    """Go to the home timeline with the site's own shortcut, clicking Home as a fallback."""
+    desk("focus", f"window={title}")
+    before = title
+    for name in ("Home", "首页"):
+        desk("key", f"window={title}", "keys=g")
+        time.sleep(0.3)
+        desk("key", f"window={title}", "keys=h")
+        time.sleep(2)
+        title = firefox_windows()[0]["title"]
+        if any(title.startswith(t) for t in HOME_TITLES):
+            return title
+        try:
+            found = desk("find", f"name={name}").get("found") or []
+        except RuntimeError:
+            found = []
+        for node in found:
+            if node.get("role") == "link":
+                desk("act", f"id={node['id']}", "action=click")
+                time.sleep(3)
+                title = firefox_windows()[0]["title"]
+                if any(title.startswith(t) for t in HOME_TITLES):
+                    return title
+                break
+    print(f"warning: could not reach Home (title={title!r}, was {before!r})", file=sys.stderr)
+    return title
+
+
+def first_article(title):
+    found = articles(title)
+    return found[0][1] if found else None
+
+
+def select_tab(title, tab, timeout=20):
+    """Select a timeline tab inside the page, such as Following.
+
+    This is an in-page tab, not a browser tab, so the window title does not change: confirm by
+    its selected state and by the first post changing.
+    """
+    if not tab:
+        return
+    before = first_article(title)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            found = desk("find", f"name={tab}").get("found") or []
+        except RuntimeError:
+            found = []
+        for node in found:
+            if node.get("role") != "tab":
+                continue
+            if "selected" in (node.get("states") or []):
+                return
+            try:
+                desk("act", f"id={node['id']}", "action=click")
+            except RuntimeError:
+                desk("press", f"id={node['id']}")
+            switch_deadline = time.time() + 10
+            while time.time() < switch_deadline:
+                now = first_article(title)
+                if now and now != before:
+                    time.sleep(1.5)
+                    return
+                time.sleep(1)
+            print(f"warning: tab {tab!r} did not change the timeline", file=sys.stderr)
+            return
+        if time.time() >= deadline:
+            print(f"warning: no tab named {tab!r}", file=sys.stderr)
+            return
+        time.sleep(1)
 
 
 def articles(title):
+    """Every post the tree currently shows, as (node id, accessible name)."""
     snap = desk("snapshot", f"window={title}", "text=true", "max_chars=80000")
     found = []
     for line in (snap.get("text") or "").splitlines():
@@ -128,58 +300,15 @@ def articles(title):
     return found
 
 
-def wait_ready(title, timeout):
-    """A page is ready once it renders at least one post."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if articles(title):
-                return True
-        except RuntimeError:
-            pass
-        time.sleep(1)
-    return False
-
-
-def navigate(url, window_needle, timeout):
-    title = firefox_window(window_needle)
-    desk("focus", f"window={title}")
-    desk("key", f"window={title}", "keys=ctrl+l")
-    desk("type", f"window={title}", f"text={url}")
-    desk("key", f"window={title}", "keys=Return")
-    time.sleep(2)
-    title = firefox_window(window_needle)
-    if not wait_ready(title, timeout):
-        print(f"warning: {url} rendered no post within {timeout}s", file=sys.stderr)
-    return title
-
-
-def press_tab(title, tab, timeout=10):
-    """Click a home tab; it may render a moment after the first post does."""
-    if not tab:
-        return
-    deadline = time.time() + timeout
-    while True:
-        try:
-            found = desk("find", f"name={tab}").get("found") or []
-        except RuntimeError:
-            found = []
-        for node in found:
-            if node.get("role") == "tab":
-                desk("press", f"id={node['id']}")
-                time.sleep(4)
-                return
-        if time.time() >= deadline:
-            print(f"warning: no tab named {tab!r}", file=sys.stderr)
-            return
-        time.sleep(1)
-
-
-def collect(title, screens, pause=3.5):
+def collect(title, screens, pause=3.5, links=None):
     seen = {}
     for i in range(screens):
         for article_id, text in articles(title):
             seen.setdefault(article_id, text)
+        if links is not None:
+            # Posts leave the DOM once scrolled past, so resolve links while they are there.
+            for name, permalink in read_links().items():
+                links.setdefault(name, permalink)
         if i < screens - 1:
             desk("scroll", "direction=down", "amount=8", f"window={title}")
             time.sleep(pause)
@@ -300,54 +429,35 @@ def to_markdown(sections):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--open", metavar="URL[,URL...]",
-                    help="navigate to each URL (comma separated) before scraping")
     ap.add_argument("--tab", metavar="NAME[,NAME...]",
-                    help="click this tab after each page loads; comma separated and matched by "
-                         "position with --open, a single value applies to every page")
-    ap.add_argument("--screens", type=int, default=6, help="screens to scroll per page")
+                    help="timeline tab to select on Home; comma separated to read several "
+                         "in one run")
+    ap.add_argument("--screens", type=int, default=6,
+                    help="screens to scroll per tab (default 6)")
     ap.add_argument("--format", choices=("json", "md"), default="json")
     ap.add_argument("--links", action="store_true",
                     help="also resolve each post's permalink through AT-SPI (needs pyatspi)")
     ap.add_argument("--window", metavar="SUBSTR", help="pick the Firefox window by title")
-    ap.add_argument("--timeout", type=int, default=20, help="seconds to wait for a page")
     args = ap.parse_args()
 
-    urls = [u.strip() for u in (args.open or "").split(",") if u.strip()]
-    tabs = [t.strip() for t in (args.tab or "").split(",") if t.strip()]
+    tabs = [t.strip() for t in (args.tab or "").split(",") if t.strip()] or [None]
 
-    if not urls:
-        title = firefox_window(args.window)
-        press_tab(title, tabs[0] if tabs else None)
-        posts = parse_many(collect(title, args.screens))
-        if args.links:
-            print(f"   {attach_links(posts, read_links())} of {len(posts)} posts got a permalink",
-                  file=sys.stderr)
-        if args.format == "md":
-            print(to_markdown([("current window", posts)]))
-        else:
-            print(json.dumps(posts, ensure_ascii=False, indent=1))
-        return 0
+    title = ensure_firefox(args.window)
+    title = ensure_x_tab(title)
+    title = click_home(title)
 
     sections = []
-    for index, url in enumerate(urls):
-        if index < len(tabs):
-            tab = tabs[index]
-        elif len(tabs) == 1:
-            tab = tabs[0]
-        else:
-            tab = None
-        print(f"== {url} (tab={tab or '-'})", file=sys.stderr)
-        title = navigate(url, args.window, args.timeout)
-        press_tab(title, tab)
-        posts = parse_many(collect(title, args.screens), source=url)
+    for tab in tabs:
+        select_tab(title, tab)
+        title = firefox_windows()[0]["title"]
+        links = {} if args.links else None
+        posts = parse_many(collect(title, args.screens, links=links))
         if args.links:
-            resolved = read_links()
-            print(f"   {len(posts)} posts, {attach_links(posts, resolved)} with a permalink",
+            print(f"   {len(posts)} posts, {attach_links(posts, links)} with a permalink",
                   file=sys.stderr)
         else:
             print(f"   {len(posts)} posts", file=sys.stderr)
-        sections.append((f"{url} [{tab}]" if tab else url, posts))
+        sections.append((f"{title} [{tab or '-'}]", posts))
 
     if args.format == "md":
         print(to_markdown(sections))
@@ -362,4 +472,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as error:
+        sys.exit(f"x-timeline: {error}")
