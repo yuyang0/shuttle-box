@@ -2,20 +2,21 @@
 """Collect X timelines through Firefox's accessibility tree.
 
 Always the same path: make sure Firefox is running, make sure an x.com tab is the active one,
-click Home in the site's navigation, then read the timeline - optionally after selecting a tab
-such as Following. No URL to pass, no CDP and no JS injection: this is the accessibility tree an
-agent drives through shuttle.
+go to Home, then read the timeline - optionally after selecting a tab such as Following.
+
+One structured snapshot yields both the posts and their permalinks: since shuttle 0.1.41 a
+`link` node carries its target URL, so no second reader and no name matching is needed. No CDP
+and no JS injection either: this is the accessibility tree an agent drives through shuttle.
 
 Examples
     bin/x-timeline.py                          # Home, whatever tab it shows
     bin/x-timeline.py --tab Following          # Home, then the Following tab
-    bin/x-timeline.py --tab Following,Investment --links --format md
+    bin/x-timeline.py --tab Following,Investment --format md
     bin/x-timeline.py --screens 8 > feed.json
 """
 import argparse
 import json
 import os
-import pathlib
 import re
 import subprocess
 import sys
@@ -23,8 +24,14 @@ import time
 
 CONTAINER = os.environ.get("SHUTTLE_CONTAINER", "shuttle-box")
 
-ARTICLE = re.compile(r'^- article "(.*)" \[id=([^\]]+)\]$', re.S)
-HANDLE = re.compile(r'@([A-Za-z0-9_]{1,15})')
+# Firefox shows a tab's title, and an x.com tab always ends with the site name.
+X_TAB = re.compile(r"/ X$")
+TAB = re.compile(r'^- tab "(.*)" \[id=([^\]]+)\]$')
+# A permalink ends at the status id; /analytics, /photo/1 and friends do not qualify.
+STATUS = re.compile(r"/(?:i/web/)?status/\d+(?:[?#].*)?$")
+START_URL = "https://x.com/home"
+
+HANDLE = re.compile(r"@([A-Za-z0-9_]{1,15})")
 # Longer units first: "7 hours ago" must not be read as "7 h".
 TIME = re.compile(
     r"(Just now|"
@@ -39,8 +46,9 @@ ENGAGEMENT_TAIL = re.compile(
     r"(?:,\s*)?)+)$"
 )
 COUNT = re.compile(r"(\d[\d,]*)\s*(repl(?:y|ies)|reposts?|likes?|bookmarks?|views?|quotes?)")
-# Links that are literally visible in a post's text; the accessibility tree exposes no
-# permalink of its own on Linux, so this is all we can recover without clicking.
+# X appends this to some posts' accessible names; it is not part of the author.
+NAME_NOISE = re.compile(r"\s*Provides details about protected accounts\.?", re.I)
+# Links that are literally visible in a post's text.
 VISIBLE_URL = re.compile(r"(?:https?://|(?<![\w@.])(?:x|twitter)\.com/)[^\s\u2026]+")
 
 
@@ -56,49 +64,6 @@ def desk(*args):
         return json.loads(out)
     except json.JSONDecodeError:
         return out
-
-
-def read_links():
-    """Ask AT-SPI for the URI behind each post's timestamp link (see bin/x-links.py)."""
-    script = pathlib.Path(__file__).with_name("x-links.py")
-    if not script.exists():
-        print(f"warning: {script} is missing", file=sys.stderr)
-        return {}
-    proc = subprocess.run(
-        ["docker", "exec", "-i", CONTAINER, "python3", "-"],
-        input=script.read_text(), capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        print(f"warning: link reader failed: {proc.stderr.strip()[:200]}", file=sys.stderr)
-        return {}
-    try:
-        posts = json.loads(proc.stdout).get("posts", [])
-    except json.JSONDecodeError:
-        print("warning: link reader returned no JSON", file=sys.stderr)
-        return {}
-    return {p["name"]: p["permalink"] for p in posts if p.get("permalink")}
-
-
-def attach_links(posts, by_name):
-    """Attach the permalink of the node with the same accessible name, and nothing else.
-
-    No fallback by handle: one author usually has several posts in a scrape, so guessing would
-    attach someone else's post rather than admit the miss.
-    """
-    matched = 0
-    for post in posts:
-        url = by_name.get(post.get("_name"))
-        if url:
-            post["url"] = url
-            matched += 1
-        post.pop("_name", None)
-    return matched
-
-
-# Firefox shows a tab's title, and an x.com tab always ends with the site name.
-X_TAB = re.compile(r"/ X$")
-TAB = re.compile(r'^- tab "(.*)" \[id=([^\]]+)\]$')
-START_URL = "https://x.com/home"
 
 
 def firefox_windows(needle=None):
@@ -117,16 +82,16 @@ def is_x_tab(name):
     return bool(name) and bool(X_TAB.search(name))
 
 
-def window_title_of(pid):
-    for win in firefox_windows():
-        if str(win.get("pid")) == str(pid):
-            return win.get("title")
-    return None
-
-
 def active_tab_is(name, title):
     """Firefox titles its window "<tab title> — Mozilla Firefox"."""
     return title == f"{name} — Mozilla Firefox"
+
+
+def firefox_running():
+    """A live process may have no window yet; launching then would start a second instance."""
+    proc = subprocess.run(["docker", "exec", CONTAINER, "pgrep", "-x", "firefox-bin"],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
 
 
 def tabs_of(title):
@@ -139,6 +104,16 @@ def tabs_of(title):
     return tabs
 
 
+def current_window(needle=None, attempts=40):
+    """The window title right now: Firefox rewrites it as a page loads."""
+    for _ in range(attempts):
+        wins = firefox_windows(needle)
+        if wins:
+            return wins[0]["title"]
+        time.sleep(0.5)
+    raise RuntimeError("no Firefox window")
+
+
 def wait_tab_active(name, timeout=15):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -147,13 +122,6 @@ def wait_tab_active(name, timeout=15):
             return True
         time.sleep(0.5)
     return False
-
-
-def firefox_running():
-    """A live process may have no window yet; launching then would start a second instance."""
-    proc = subprocess.run(["docker", "exec", CONTAINER, "pgrep", "-x", "firefox-bin"],
-                          capture_output=True, text=True)
-    return proc.returncode == 0
 
 
 def ensure_firefox(needle=None, timeout=60):
@@ -184,32 +152,37 @@ def ensure_firefox(needle=None, timeout=60):
 
 def ensure_x_tab(title, timeout=40):
     """Make an x.com tab the active one, opening one when the window has none."""
+    title = current_window()
     for name, node in tabs_of(title):
         if not is_x_tab(name):
             continue
         if active_tab_is(name, title):
             return title
+        title = current_window()
         desk("focus", f"window={title}")
         desk("act", f"id={node}", "action=click")
         if wait_tab_active(name):
-            return firefox_windows()[0]["title"]
+            return current_window()
         print(f"warning: could not switch to tab {name!r}", file=sys.stderr)
         return title
 
     print(f"no x.com tab, opening {START_URL}", file=sys.stderr)
+    title = current_window()
     desk("focus", f"window={title}")
     desk("key", f"window={title}", "keys=ctrl+t")
     time.sleep(1.5)
+    title = current_window()
     desk("type", f"window={title}", f"text={START_URL}")
     desk("key", f"window={title}", "keys=Return")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for name, node in tabs_of(firefox_windows()[0]["title"]):
+        title = current_window()
+        for name, node in tabs_of(title):
             if is_x_tab(name):
-                if not active_tab_is(name, firefox_windows()[0]["title"]):
+                if not active_tab_is(name, title):
                     desk("act", f"id={node}", "action=click")
                     wait_tab_active(name)
-                return firefox_windows()[0]["title"]
+                return current_window()
         time.sleep(1)
     raise RuntimeError(f"no x.com tab after opening {START_URL}")
 
@@ -219,14 +192,15 @@ HOME_TITLES = ("Home / X", "首页 / X")
 
 def click_home(title, timeout=30):
     """Go to the home timeline with the site's own shortcut, clicking Home as a fallback."""
-    desk("focus", f"window={title}")
     before = title
     for name in ("Home", "首页"):
+        title = current_window()
+        desk("focus", f"window={title}")
         desk("key", f"window={title}", "keys=g")
         time.sleep(0.3)
         desk("key", f"window={title}", "keys=h")
         time.sleep(2)
-        title = firefox_windows()[0]["title"]
+        title = current_window()
         if any(title.startswith(t) for t in HOME_TITLES):
             return title
         try:
@@ -237,7 +211,7 @@ def click_home(title, timeout=30):
             if node.get("role") == "link":
                 desk("act", f"id={node['id']}", "action=click")
                 time.sleep(3)
-                title = firefox_windows()[0]["title"]
+                title = current_window()
                 if any(title.startswith(t) for t in HOME_TITLES):
                     return title
                 break
@@ -245,9 +219,52 @@ def click_home(title, timeout=30):
     return title
 
 
-def first_article(title):
-    found = articles(title)
-    return found[0][1] if found else None
+def snapshot(title, chars=200000):
+    """One structured read: every node, with a link's target URL where there is one."""
+    return desk("snapshot", f"window={title}", "urls=true", f"max_chars={chars}")
+
+
+def posts_in(nodes):
+    """(node id, accessible name, permalink) for every post, in document order."""
+    children = {}
+    for node in nodes:
+        children.setdefault(node.get("parent", -1), []).append(node)
+
+    found = []
+    for node in nodes:
+        if node.get("role") != "article":
+            continue
+        url = None
+        stack = list(children.get(node["ref"], []))
+        while stack and url is None:
+            current = stack.pop()
+            if current.get("role") == "link":
+                target = current.get("url") or ""
+                if STATUS.search(target):
+                    url = target
+                    continue
+            if current.get("role") != "article":      # a quoted post has its own links
+                stack.extend(children.get(current["ref"], []))
+        found.append((node.get("id"), node.get("name") or "", url))
+    return found
+
+
+def wait_for_posts(title, timeout=20):
+    """A timeline is ready when its first read shows at least one post."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if posts_in(snapshot(title)["nodes"]):
+                return True
+        except (RuntimeError, KeyError):
+            pass
+        time.sleep(1)
+    return False
+
+
+def first_post(title):
+    posts = posts_in(snapshot(title)["nodes"])
+    return posts[0][1] if posts else None
 
 
 def select_tab(title, tab, timeout=20):
@@ -258,7 +275,10 @@ def select_tab(title, tab, timeout=20):
     """
     if not tab:
         return
-    before = first_article(title)
+    # Another tab keeps whatever scroll position the page had, so compare from the top.
+    desk("key", f"window={title}", "keys=ctrl+Home")
+    time.sleep(1.5)
+    before = first_post(title)
     deadline = time.time() + timeout
     while True:
         try:
@@ -274,9 +294,16 @@ def select_tab(title, tab, timeout=20):
                 desk("act", f"id={node['id']}", "action=click")
             except RuntimeError:
                 desk("press", f"id={node['id']}")
-            switch_deadline = time.time() + 10
+            switch_deadline = time.time() + 15
             while time.time() < switch_deadline:
-                now = first_article(title)
+                try:
+                    again = desk("find", f"name={tab}").get("found") or []
+                except RuntimeError:
+                    again = []
+                if any("selected" in (n.get("states") or []) for n in again):
+                    time.sleep(1.5)
+                    return
+                now = first_post(title)
                 if now and now != before:
                     time.sleep(1.5)
                     return
@@ -289,27 +316,19 @@ def select_tab(title, tab, timeout=20):
         time.sleep(1)
 
 
-def articles(title):
-    """Every post the tree currently shows, as (node id, accessible name)."""
-    snap = desk("snapshot", f"window={title}", "text=true", "max_chars=80000")
-    found = []
-    for line in (snap.get("text") or "").splitlines():
-        match = ARTICLE.match(line.strip())
-        if match:
-            found.append((match.group(2), match.group(1)))
-    return found
-
-
-def collect(title, screens, pause=3.5, links=None):
+def collect(title, screens, pause=3.5):
+    """Scroll through the timeline, keeping each post once with its permalink."""
     seen = {}
-    for i in range(screens):
-        for article_id, text in articles(title):
-            seen.setdefault(article_id, text)
-        if links is not None:
-            # Posts leave the DOM once scrolled past, so resolve links while they are there.
-            for name, permalink in read_links().items():
-                links.setdefault(name, permalink)
-        if i < screens - 1:
+    for index in range(screens):
+        if index == 0:
+            wait_for_posts(title)
+        for node_id, name, url in posts_in(snapshot(title)["nodes"]):
+            if node_id in seen:
+                if url and not seen[node_id]["url"]:
+                    seen[node_id]["url"] = url
+            else:
+                seen[node_id] = {"name": name, "url": url}
+        if index < screens - 1:
             desk("scroll", "direction=down", "amount=8", f"window={title}")
             time.sleep(pause)
     return list(seen.values())
@@ -359,7 +378,8 @@ def parse(raw):
         head = f"@{post['handle']}"
         if head in rest:
             author, rest = rest.split(head, 1)
-            post["author"] = author.replace("Verified account", "").strip()
+            author = NAME_NOISE.sub("", author.replace("Verified account", ""))
+            post["author"] = " ".join(author.split())
             rest = rest.lstrip()
 
     reply = REPLY_TO.match(rest)
@@ -375,16 +395,14 @@ def parse(raw):
         else:
             post["text"] = rest.strip()
 
-    # A post that is only an image or a video has no text body; keep the accessible name
-    # so nothing is silently dropped.
+    # A post that is only an image or a video has no text body; keep the accessible name so
+    # nothing is silently dropped.
     post.setdefault("text", "")
     haystack = post["text"] + " " + post.get("quote", "")
     urls = [u.rstrip(".,;:)]}") for u in VISIBLE_URL.findall(haystack)]
     if urls:
         post["urls"] = urls
     if post.get("handle"):
-        # The profile, not the post: a post permalink needs its status id, which AT-SPI
-        # does not carry here.
         post["profile"] = f"https://x.com/{post['handle']}"
     if not post["text"]:
         post["raw"] = raw
@@ -392,12 +410,14 @@ def parse(raw):
 
 
 def parse_many(items, source=None):
-    posts = [parse(raw) for raw in items]
-    for post, raw in zip(posts, items):
-        post["_name"] = raw          # kept only until links are attached
-    if source:
-        for post in posts:
+    posts = []
+    for item in items:
+        post = parse(item["name"])
+        if item.get("url"):
+            post["url"] = item["url"]
+        if source:
             post["source"] = source
+        posts.append(post)
     return posts
 
 
@@ -405,11 +425,11 @@ def to_markdown(sections):
     out = []
     for source, posts in sections:
         out.append(f"## {source}\n")
-        for i, post in enumerate(posts, 1):
+        for index, post in enumerate(posts, 1):
             who = post.get("author") or "(unknown)"
             handle = f" (@{post['handle']})" if post.get("handle") else ""
             when = f" · {post['time']}" if post.get("time") else ""
-            out.append(f"{i}. **{who}**{handle}{when}")
+            out.append(f"{index}. **{who}**{handle}{when}")
             out.append(f"   {(post.get('text') or '').strip()}")
             if post.get("quote"):
                 out.append(f"   > {post['quote'][:200]}")
@@ -435,8 +455,6 @@ def main():
     ap.add_argument("--screens", type=int, default=6,
                     help="screens to scroll per tab (default 6)")
     ap.add_argument("--format", choices=("json", "md"), default="json")
-    ap.add_argument("--links", action="store_true",
-                    help="also resolve each post's permalink through AT-SPI (needs pyatspi)")
     ap.add_argument("--window", metavar="SUBSTR", help="pick the Firefox window by title")
     args = ap.parse_args()
 
@@ -450,13 +468,9 @@ def main():
     for tab in tabs:
         select_tab(title, tab)
         title = firefox_windows()[0]["title"]
-        links = {} if args.links else None
-        posts = parse_many(collect(title, args.screens, links=links))
-        if args.links:
-            print(f"   {len(posts)} posts, {attach_links(posts, links)} with a permalink",
-                  file=sys.stderr)
-        else:
-            print(f"   {len(posts)} posts", file=sys.stderr)
+        posts = parse_many(collect(title, args.screens))
+        withurl = sum(1 for post in posts if post.get("url"))
+        print(f"   {len(posts)} posts, {withurl} with a permalink", file=sys.stderr)
         sections.append((f"{title} [{tab or '-'}]", posts))
 
     if args.format == "md":

@@ -32,8 +32,8 @@ scripts/start-desktop   Xvnc -> xfce -> AT-SPI wake -> shuttle serve -> mcp --ht
 scripts/firefox.sh      /usr/local/bin/firefox: writes user.js (proxy, lang, Terms) then execs
 bin/shuttle-mcp.sh      stdio MCP bridge over docker exec, starts the container on demand
 bin/mcp-drive.py        small MCP client (tools/status/screen/windows/launch/open-url/shot)
-bin/x-timeline.py       X timelines via the a11y tree: navigation, tabs, JSON/MD
-bin/x-links.py          post permalinks via AT-SPI Hyperlink.GetURI (needs pyatspi)
+bin/x-timeline.py       X timelines via the a11y tree: navigation, tabs, JSON/MD;
+                        permalinks come from `desk snapshot urls=true` (shuttle 0.1.41+)
 bin/firefox-profile.py  profile backup/restore/list, sqlite backup API
 README.md               English default; README.zh-CN.md mirrors it
 ```

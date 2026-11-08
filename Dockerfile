@@ -16,7 +16,7 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=
-ARG SHUTTLE_VERSION=0.1.40
+ARG SHUTTLE_VERSION=0.1.41
 # Point at a mirror when github.com is slow: e.g.
 #   --build-arg SHUTTLE_RELEASE_BASE=https://ghfast.top/https://github.com/loomhand/shuttle/releases/download
 ARG SHUTTLE_RELEASE_BASE=https://github.com/loomhand/shuttle/releases/download
@@ -57,7 +57,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates curl gnupg jq less procps tini xz-utils \
         locales tzdata \
         dbus dbus-x11 at-spi2-core libatk-adaptor \
-        python3-pyatspi \
         xfce4 xfce4-terminal xfce4-taskmanager mousepad xterm \
         x11-utils x11-xserver-utils xauth xdg-utils xdg-user-dirs \
         fonts-dejavu-core fonts-liberation fonts-noto-cjk \
@@ -124,6 +123,24 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends firefox; \
     mkdir -p /etc/firefox/policies; \
     firefox --version
+
+# ---------------------------------------------------------------------------
+# WeChat: the official Linux client from Tencent's CDN. It bundles a Chromium runtime
+# (XWeb) and uses private libraries, but does not declare its runtime dependencies in
+# the control file, so the four it needs are installed before the package itself.
+# ---------------------------------------------------------------------------
+ARG WECHAT_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
+    apt-get update -o Acquire::Retries=3; \
+    apt-get install -y --no-install-recommends libatomic1 libnss3 libnspr4; \
+    curl -fsSL --noproxy '*' --retry 3 --retry-delay 2 --connect-timeout 15 \
+        -o /tmp/wechat.deb "${WECHAT_URL}"; \
+    apt-get install -y --no-install-recommends /tmp/wechat.deb; \
+    rm -f /tmp/wechat.deb; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -x /usr/bin/wechat
 
 # ---------------------------------------------------------------------------
 # shuttle: official release archive, checksum-verified, unpacked as shipped
