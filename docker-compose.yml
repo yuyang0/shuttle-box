@@ -24,6 +24,8 @@ services:
       - MCP_HTTP_BIND=${MCP_HTTP_BIND:-127.0.0.1}
       - SHUTTLE_BASE_URL=${SHUTTLE_BASE_URL:-}
       - SHUTTLE_SAFE_APPS=${SHUTTLE_SAFE_APPS:-}
+      # gui_plan flows live in the volume: a saved plan has to outlive the container
+      - SHUTTLE_FLOWS=${SHUTTLE_FLOWS:-/home/box/.config/loomhand/shuttle/flows}
       - SCREEN_GEOMETRY=${SCREEN_GEOMETRY:-1280x800}
       # 刻意不用 TZ/LANG 这两个名字：compose 的 ${VAR:-default} 会取运行 compose 那个
       # shell 的环境变量，宿主机上的 LANG=C.UTF-8 会覆盖掉这里的默认值
