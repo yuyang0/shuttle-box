@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -52,18 +53,22 @@ NAME_NOISE = re.compile(r"\s*Provides details about protected accounts\.?", re.I
 VISIBLE_URL = re.compile(r"(?:https?://|(?<![\w@.])(?:x|twitter)\.com/)[^\s\u2026]+")
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from shuttle_client import Client, desk_call          # noqa: E402
+
+CLIENT = None
+
+
+def client(transport="auto"):
+    global CLIENT
+    if CLIENT is None:
+        CLIENT = Client(transport)
+    return CLIENT
+
+
 def desk(*args):
-    proc = subprocess.run(
-        ["docker", "exec", CONTAINER, "shuttle", "desk", *args],
-        capture_output=True, text=True,
-    )
-    out = proc.stdout.strip()
-    if not out:
-        raise RuntimeError(f"{args} produced nothing: {proc.stderr.strip()}")
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return out
+    """`desk VERB k=v ...` through MCP, whichever transport is available."""
+    return desk_call(client(), *args)
 
 
 def firefox_windows(needle=None):
@@ -89,8 +94,11 @@ def active_tab_is(name, title):
 
 def firefox_running():
     """A live process may have no window yet; launching then would start a second instance."""
-    proc = subprocess.run(["docker", "exec", CONTAINER, "pgrep", "-x", "firefox-bin"],
-                          capture_output=True, text=True)
+    if shutil.which("docker") and not os.path.exists("/.dockerenv"):
+        proc = subprocess.run(["docker", "exec", CONTAINER, "pgrep", "-x", "firefox-bin"],
+                              capture_output=True, text=True)
+        return proc.returncode == 0
+    proc = subprocess.run(["pgrep", "-x", "firefox-bin"], capture_output=True)
     return proc.returncode == 0
 
 
