@@ -4,24 +4,24 @@ Project instructions for coding agents on **shuttle-box**.
 
 ## What this is
 
-A container running an XFCE desktop (TigerVNC `Xvnc` + noVNC) with Firefox, plus
+A container running an XFCE desktop (TigerVNC `Xvnc` + noVNC) with Firefox and WeChat, plus
 [shuttle](https://github.com/loomhand/shuttle) so an agent outside the container drives that
 desktop over MCP. The image is published to ghcr.io; this repo is the build recipe, the runtime
-scripts and the host-side helpers.
+scripts and the host-side tools.
 
 | Part | Files | Boundary |
 |---|---|---|
 | Desktop container | `Dockerfile`, `scripts/`, `assets/`, `docker-compose.yml` | own X server, Firefox via AT-SPI, shuttle over a unix socket |
-| Host tooling | `Makefile`, `bin/`, `quickstart.sh` | docker and MCP over HTTP |
+| Host tools | `Makefile`, `bin/`, `quickstart.sh` | MCP over HTTP, or stdin/stdout into the container |
 | Package pipeline | `.github/workflows/build.yml` | ghcr.io, tag pushes only |
 
 The only state outliving the container is the volume `box-home` at `/home/box`: the Firefox
-profile (cookies, logins) and shuttle's `config.toml`.
+profile (cookies, logins), WeChat's data (`~/.xwechat`) and shuttle's `config.toml`.
 
 ## Layout
 
 ```
-Dockerfile              Ubuntu 24.04 + XFCE + Firefox + upstream noVNC/websockify + shuttle
+Dockerfile              Ubuntu 24.04 + XFCE + Firefox + WeChat + upstream noVNC/websockify + shuttle
 docker-compose.yml      host network, seccomp=unconfined, shm 2g, volume, env pass-through
 quickstart.sh           standalone: writes its compose + .env, pulls, starts, prints MCP config
 Makefile                build/up/recreate/status/logs/shell/browser/shot/backup/restore/mcp-test
@@ -30,10 +30,11 @@ assets/                 firefox.desktop, policies.json, novnc-index.html (redire
 scripts/entrypoint.sh   root: dirs, stale locks, VNC password, renders config.toml, hands over
 scripts/start-desktop   Xvnc -> xfce -> AT-SPI wake -> shuttle serve -> mcp --http -> websockify
 scripts/firefox.sh      /usr/local/bin/firefox: writes user.js (proxy, lang, Terms) then execs
-bin/shuttle-mcp.sh      stdio MCP bridge over docker exec, starts the container on demand
-bin/mcp-drive.py        small MCP client (tools/status/screen/windows/launch/open-url/shot)
-bin/x-timeline.py       X timelines via the a11y tree: navigation, tabs, JSON/MD;
-                        permalinks come from `desk snapshot urls=true` (shuttle 0.1.41+)
+bin/shuttle_client.py   the one MCP client: http, docker exec stdio, or local stdio
+bin/mcp-drive.py        small CLI over it: tools/status/screen/windows/launch/open-url/shot
+bin/x-timeline.py       X timelines: drives Firefox to Home, reads posts and permalinks
+bin/wx-article.py       WeChat: newest article of an account, or of the 公众号 feed
+bin/shuttle-mcp.sh      stdio bridge over docker exec, starting the container on demand
 bin/firefox-profile.py  profile backup/restore/list, sqlite backup API
 README.md               English default; README.zh-CN.md mirrors it
 ```
@@ -44,7 +45,7 @@ README.md               English default; README.zh-CN.md mirrors it
 make build              # mirror + host proxy by default; PROXY= APT_MIRROR= to go direct
 make pull && make up    # published image (TAG defaults to latest)
 make recreate && make mcp-test && make status
-make backup             # Firefox profile -> ./backups
+bin/shuttle_client.py --transport http|docker|local     # which transport works, right now
 ```
 
 ## Invariants
@@ -58,25 +59,37 @@ make backup             # Firefox profile -> ./backups
   through its AT-SPI tree; there is no CDP and no DevTools endpoint anywhere.
 - **MCP is HTTP** (`shuttle mcp --http 127.0.0.1:8765`) and requires `SHUTTLE_MCP_TOKEN`; it
   refuses to start without one, even on loopback. A stdio `docker exec` child dies with the
-  container and leaves the client holding a dead pipe.
+  container and leaves the client holding a dead pipe, so host tools take http first.
+- **Host tools go through `bin/shuttle_client.py`.** Desk work is an MCP `desk` call, never a
+  hand-built `shuttle desk` command: `http` from the host, `docker` or `local` stdio otherwise.
 - **Readiness is `/home/box/.cache/box/ready`**, not the presence of `desk.sock`: that file
   survives restarts and yields a daemon without the D-Bus session.
 - **`config.toml` is rendered only when missing**; editing it sticks, changing `SHUTTLE_*` env
   needs `SHUTTLE_CONFIG_REGENERATE=1`.
 - **`SHUTTLE_VERSION` lives in the Dockerfile `ARG` only**; the Makefile reads it from there.
+- **WeChat is never started, restarted or killed by a tool.** It must already be open and logged
+  in — a restart drops it to the login screen and needs a phone confirmation. Every script fails
+  fast with that reason instead.
+- **WeChat exposes two processes.** The Qt shell holds the search box and chat list (its window
+  title is often empty, address it by pid); the embedded Chromium (`WeChatAppEx`) holds the
+  account page and article text, which is where paragraphs come from.
+- **Browsers tabs must be cleaned up.** `wx-article.py` closes the tabs it opened, and
+  `--close-tabs` clears what earlier runs left behind; four `关闭` buttons mean one tab left.
 - **CI builds on tags only**; a push to `main` builds nothing. Local builds need `--network=host`
   plus mirror and proxy, the runner needs none.
 - **noVNC/websockify stay upstream** (pinned sha256, venv); the distro packages pull in nodejs
   and python3-numpy.
-- **Secrets never enter the repo**: `.env` is gitignored (600), so is `backups/`.
+- **Secrets never enter the repo**: `.env` is gitignored (600), so are `backups/` and `*.png`.
 
 ## Verifying a change
 
 ```bash
 make build && make recreate
 make mcp-test                                   # HTTP MCP handshake
+bin/shuttle_client.py --transport docker        # the stdio path too
 docker exec shuttle-box shuttle desk windows    # xfwm4/xfce4-panel/xfdesktop/firefox-bin
-make -s browser URL=https://example.com && make status && bin/mcp-drive.py shot /tmp/x.png
+bin/x-timeline.py --screens 1                   # Firefox: posts and permalinks
+bin/wx-article.py --following --scroll 2        # WeChat: the 公众号 feed
 ```
 
 Anything touching the desktop also needs one model-backed call, e.g.

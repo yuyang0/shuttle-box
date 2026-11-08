@@ -1,3 +1,6 @@
+# 截图/图片产物
+*.png
+
 # make 产物
 /timeline.json
 /shot.png
