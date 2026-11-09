@@ -1,0 +1,27 @@
+# source-watch 配置。每个 [sources.<名字>] 一节；<名字> 同时决定产物目录 output/<名字>/。
+# type 选模块（scripts/modules/），其余键原样交给模块。
+# every 是更新频率：距上一次成功抓到内容起算，未满就跳过；支持 30m / 6h / 1d / 1w。
+# 脚本不自我调度，由外部定时器触发；every 只负责让每次触发跳过还没到期的源。
+# [defaults] 提供公共值，源内同名键优先。
+
+[defaults]
+every = "1d"
+
+[sources.youtube]
+type = "youtube"
+channels = ["UCTAJ0JnR9oYvILu-mtNcufQ"]  # 多个频道写多个，也接受 @handle / 频道 URL
+budget_seconds = 2400                    # 单轮转写墙钟预算（整个源共享）；0 = 不限
+long_media_seconds = 3600                # 超过只落元数据，不转写
+
+[sources.x]
+type = "x"
+every = "6h"
+screens = 4                             # 每次滚动几屏，约每屏 4–8 条帖子
+tabs = ["Investment", "AI + Semiconductors"]   # Home 的页内标签；空数组 = Home 当前那一栏
+accounts = []                           # 账号时间线，写法 ["@handle", ...]
+
+[sources.wx]
+type = "wechat"
+every = "1d"
+accounts = ["Kevin策略研究"]             # 多个公众号就写多个
+count = 1                               # 每个账号读最新几篇

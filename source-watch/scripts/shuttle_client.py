@@ -2,8 +2,8 @@
 """One MCP client for shuttle, over HTTP or stdio.
 
 The container publishes the desktop as MCP over HTTP (`SHUTTLE_MCP_TOKEN`, port 8765) and also
-speaks MCP over stdio (`shuttle mcp`). Tools in this directory use this module so the same
-command works from the host and from inside the container:
+speaks MCP over stdio (`shuttle mcp`). Host tools import this module so the same command works
+from the host and from inside the container:
 
     http        POST JSON-RPC to http://127.0.0.1:8765/mcp with a bearer token
     docker      `docker exec -i <container> shuttle mcp`, from the host without HTTP
@@ -28,14 +28,17 @@ def env_token():
     token = os.environ.get("SHUTTLE_MCP_TOKEN", "").strip()
     if token:
         return token
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    try:
-        with open(os.path.join(here, ".env"), encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("SHUTTLE_MCP_TOKEN="):
-                    return line.split("=", 1)[1].strip()
-    except OSError:
-        pass
+    # 从本文件向上找 .env：模块可能住在 source-watch/scripts/ 或 bin/ 底下。
+    directory = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        try:
+            with open(os.path.join(directory, ".env"), encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("SHUTTLE_MCP_TOKEN="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        directory = os.path.dirname(directory)
     return ""
 
 
@@ -245,7 +248,7 @@ def desk_call(client, *args):
 
 
 def main():
-    """Small smoke test: bin/shuttle_client.py [--transport http|docker|local] status"""
+    """Small smoke test: scripts/shuttle_client.py [--transport http|docker|local] status"""
     import argparse
     ap = argparse.ArgumentParser(description="check which MCP transport works")
     ap.add_argument("--transport", default="auto",

@@ -1,0 +1,6 @@
+# 本地生成的产物与运行状态，不进仓库
+output/
+last_success.json
+pending.json
+
+__pycache__/
