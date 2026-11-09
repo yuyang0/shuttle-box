@@ -101,10 +101,8 @@ make help            # every target and overridable variable
 | `make screen` / `make windows` | current screen size / window list |
 | `make tools` / `make mcp-test` | list MCP tools / run an initialize + tools/list round trip |
 | `make resize GEOMETRY=1600x1200` | change the resolution at runtime |
-| `make backup` | back up the Firefox profile (cookies, logins) to `./backups` |
-| `make restore` | restore the newest backup (`FILE=` picks one) |
 | `make clean` | remove the container, **keep the volume** (the login survives) |
-| `make clean-volume FORCE=1` | remove the volume too, after an automatic backup |
+| `make clean-volume FORCE=1` | remove the volume too |
 
 Overridable variables: `IMAGE` `TAG` `CONTAINER` `APT_MIRROR` `PROXY` `SHUTTLE_VERSION` `URL` `GEOMETRY`.
 
@@ -128,6 +126,26 @@ bin/mcp-drive.py tools
 bin/mcp-drive.py open-url https://example.com
 bin/mcp-drive.py shot out.png
 ```
+
+## Source watch
+
+`source-watch/` tracks YouTube channels, X timelines and WeChat official accounts. Whatever it
+fetches lands under `output/`; a six-hourly task turns those files into a summary, a Feishu doc
+and one message in the `investment` group.
+
+```bash
+cd source-watch
+python3 scripts/source_watch.py list           # sources, cadence, next due
+python3 scripts/source_watch.py run            # fetch whatever is due
+python3 scripts/source_watch.py run --json     # same, plus the pending summary inputs
+python3 scripts/source_watch.py pending        # fetched but not summarized yet
+python3 scripts/source_watch.py x --screens 1  # ad-hoc read, no state change
+```
+
+Each source is one `[sources.<name>]` section in `config.toml`; `every` sets how often it may
+run, `channels` / `tabs` / `accounts` list its entry points. Runtime state outside `output/` is
+just `config.toml`, `last_success.json` and `pending.json`. More:
+[source-watch/README.md](source-watch/README.md).
 
 ## CI and the registry
 
@@ -261,15 +279,12 @@ Firefox's cookies and saved passwords live in the volume at
 | `make rebuild` / `docker compose up -d --force-recreate` | no, the volume stays |
 | Rebuilding the image (`make build`) | no |
 | `make clean` | **no** (removes the container, keeps the volume) |
-| `make clean-volume` | yes, hence it needs `FORCE=1`, and it backs up first |
+| `make clean-volume` | yes, hence it needs `FORCE=1` |
 | `docker volume rm box_box-home` | yes, nothing can stop it |
 
 Other guarantees:
 
 - The Firefox launcher creates the profile only when the directory is absent and never overwrites an existing one; `entrypoint.sh` deletes just `lock` and `.parentlock`, never `cookies.sqlite`.
-- `make backup` copies each `*.sqlite` through sqlite3's backup API, so a running Firefox still yields a consistent copy. The archive holds `cookies.sqlite`, `key4.db`, `logins.db` and `prefs.js`, skipping caches and session-restore data: about 4 MB.
-- `make restore` stops Firefox, renames the current profile to `agent.default.bak-<timestamp>` and then unpacks, so a failed restore can be rolled back.
-- `bin/firefox-profile.py list` shows earlier backups.
 
 ## Sending the browser through a host proxy
 

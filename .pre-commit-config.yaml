@@ -1,0 +1,20 @@
+# Secret scanning before each commit.
+#
+#   install once:  pre-commit install
+#   scan all:      pre-commit run --all-files
+#   skip once:     git commit --no-verify
+#
+# betterleaks must already be on PATH (this config does not fetch it): it scans the staged
+# diff, exits non-zero on a hit so the commit is blocked, and redacts every match. Send false
+# positives to .betterleaksignore by fingerprint instead of loosening these settings.
+
+minimum_pre_commit_version: "3.5.0"
+default_stages: [pre-commit]
+repos:
+  - repo: local
+    hooks:
+      - id: betterleaks
+        name: betterleaks · staged secret scan
+        entry: bash -c 'command -v betterleaks >/dev/null 2>&1 || export PATH="$HOME/.local/share/mise/shims:$PATH"; exec betterleaks git --pre-commit --redact --staged --verbose'
+        language: system
+        pass_filenames: false

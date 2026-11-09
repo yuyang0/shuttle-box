@@ -27,7 +27,7 @@ python3 -m unittest discover -s tests -v            # 调度与模块的单元�
 - `output/<名字>/state.json` 模块私有的去重游标与待处理队列
 - `output/<名字>/transcripts/`、`meta/` YouTube 产物；`timeline/*.md` X 产物；`articles/*.md` 微信产物
 - `output/summaries/<YYYY-MM-DD-HHMMSS>.md` 每次摘要一份（cron 任务写入，不追加）
-- 飞书：当日摘要 → 云文档（`--as bot` 新建，默认组织内可读）→ `investment` 群发链接
+- 飞书：摘要 → 云文档（`--as bot` 新建，默认组织内可读）→ `investment` 群发正文（链接附末尾）
 - `TASK.md` 每日任务 prompt 的唯一来源；cron 任务配置里的 prompt 只写「读取本文件并照做」
 
 ## 约定
@@ -37,7 +37,7 @@ python3 -m unittest discover -s tests -v            # 调度与模块的单元�
 - 到期判断只在 `Ctx.due()` 一处；模块自己调用它，跳过就返回空列表，主流程不替模块决定。
 - 只有本轮有产物才更新 `last_success.json`；全无产出时人类可读输出只有一行「无新条目」。
 - 摘要消费的是 `pending.json`（`run --json` 会把它一起输出），所以手动提前跑的产物也能被补摘；
-  摘要写完并发出后才 `pending --clear`。
+  摘要写完并发出后才 `pending --clear`。群消息与最终回执都直接给正文，不只给文件/链接。
 - 空内容不落盘：`ctx.write()` 对空串返回 `None`，入口再过滤零字节文件。
 - 单个源失败只标 `error` 并继续其它源；退出码 `0` 正常 / `1` 有源失败 / `2` 配置错误。
 - 模块只暴露 `run(ctx) -> list[Path]`，平台细节不出模块；新增平台 = 加模块 + 在 `MODULES` 登记。

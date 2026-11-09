@@ -161,7 +161,8 @@ def run(ctx: Ctx) -> list[Path]:
 cron 任务每 6 小时（00/06/12/18）执行 `run --json`，摘要的对象是 `pending.json` 里的文件（本轮
 新产物 + 以前没摘完的），任务 prompt 的唯一来源是 `TASK.md`（cron 配置里的 prompt 只写「读取
 TASK.md 并照做」）。摘要写成 `output/summaries/<YYYY-MM-DD-HHMMSS>.md`、发成飞书文档并转发到
-`investment` 群，全部成功后才 `pending --clear`；中途失败则保留清单，下一轮重摘。
+`investment` 群（群消息正文就是摘要本身，文档链接只附在末尾），全部成功后才 `pending --clear`；
+中途失败则保留清单，下一轮重摘。最终回执也把摘要正文贴进定时任务关联的会话，不只给文件路径。
 
 ## 测试
 

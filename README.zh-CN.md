@@ -88,8 +88,6 @@ make help            # 列出所有目标与可覆盖变量
 | `make screen` / `make windows` | 当前桌面尺寸 / 窗口列表 |
 | `make tools` / `make mcp-test` | 列 MCP 工具 / 跑一次 initialize+tools/list |
 | `make resize GEOMETRY=1600x1200` | 运行期换分辨率 |
-| `make backup` | 备份 Firefox profile（cookies/登录态）到 `./backups` |
-| `make restore` | 从最近一次备份恢复（`FILE=` 指定） |
 | `make clean` | 删容器，**保留卷**（登录态不丢） |
 | `make clean-volume FORCE=1` | 连卷删，会先自动备份 |
 
@@ -110,6 +108,25 @@ bin/mcp-drive.py tools
 bin/mcp-drive.py open-url https://example.com
 bin/mcp-drive.py shot out.png
 ```
+
+## 信息源抓取
+
+`source-watch/` 跟踪 YouTube 频道、X 时间线与公众号。抓到的内容落在 `output/`；每 6 小时的
+任务把这些文件写成摘要、飞书文档，并发到 `investment` 群。
+
+```bash
+cd source-watch
+python3 scripts/source_watch.py list           # 源、频率、下次到期
+python3 scripts/source_watch.py run            # 跑所有到期的源
+python3 scripts/source_watch.py run --json     # 同上，外加待摘要文件清单
+python3 scripts/source_watch.py pending        # 已抓取、还没摘要的文件
+python3 scripts/source_watch.py x --screens 1  # 临时读一次，不改状态
+```
+
+每个源是 `config.toml` 里的一节 `[sources.<名字>]`；`every` 决定多久允许跑一次，
+`channels` / `tabs` / `accounts` 列出它的入口。`output/` 之外的运行期状态只有 `config.toml`、
+`last_success.json`、`pending.json`。详见
+[source-watch/README.md](source-watch/README.md)。
 
 ## CI 与镜像仓库
 
@@ -233,15 +250,12 @@ Firefox 的 cookie 和保存的密码都在卷里的 `/home/box/.mozilla/firefox
 | `make rebuild` / `docker compose up -d --force-recreate` | 不会，卷保留 |
 | 重建镜像（`make build`） | 不会 |
 | `make clean` | **不会**（只删容器，卷保留） |
-| `make clean-volume` | 会，所以要先 `FORCE=1`，且会先自动备份 |
+| `make clean-volume` | 会，所以要先 `FORCE=1` |
 | `docker volume rm box_box-home` | 会，无法拦截 |
 
 其它保障：
 
 - 包装脚本只在 profile **目录不存在**时才创建它，从不覆盖已有 profile；`entrypoint.sh` 只删 `lock` / `.parentlock` 两个锁文件，不碰 `cookies.sqlite`。
-- `make backup` 用 sqlite3 的 backup API 复制每个 `*.sqlite`，所以 Firefox 正在运行时也能拿到一致副本；归档里含 `cookies.sqlite`、`key4.db`、`logins.db`、`prefs.js`，跳过缓存与会话恢复数据，约 4 MB。
-- `make restore` 先停 Firefox，把现有 profile 挪成 `agent.default.bak-<时间>` 再解包，恢复失败也能退回。
-- `bin/firefox-profile.py list` 看历史备份。
 
 ## 让浏览器走宿主机代理
 

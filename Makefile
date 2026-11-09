@@ -45,7 +45,7 @@ NOVNC_PORT          ?= 16080
 MCP_HTTP_PORT       ?= 8765
 
 .PHONY: help build build-http up down restart recreate wait-ready logs logs-raw status shell \
-        tools mcp-test screen windows browser shot timeline resize stop backup restore \
+        tools mcp-test screen windows browser shot timeline resize stop \
         clean clean-volume clean-image
 
 define HELP_TEXT
@@ -70,16 +70,14 @@ shuttle-box
     make browser              打开 Firefox 并访问 $(URL)
     make screen               当前桌面尺寸
     make windows              当前窗口列表
-    make shot                 截图到 ./shot.png
-    make timeline             抓当前 X 时间线正文 -> ./timeline.json
+    make shot                 截图到 ./.temp/shot.png
+    make timeline             抓当前 X 时间线正文 -> ./.temp/timeline.json
     make resize GEOMETRY=…    运行期换分辨率
 
   清理
     make stop                 停止容器（保留卷）
-    make backup               备份 Firefox profile（cookies/登录态）到 ./backups
-    make restore              从最近一次备份恢复（restore FILE=路径 可指定）
     make clean                删除容器，保留卷（登录态不丢）
-    make clean-volume         连卷一起删，会先自动备份，且需 FORCE=1
+    make clean-volume         连卷一起删，且需 FORCE=1
     make clean-image          删除镜像
 
   可覆盖变量：IMAGE TAG CONTAINER APT_MIRROR PROXY SHUTTLE_VERSION
@@ -167,20 +165,16 @@ windows:
 	@bin/mcp-drive.py windows
 
 shot:
-	@bin/mcp-drive.py shot ./shot.png
+	@mkdir -p .temp
+	@bin/mcp-drive.py shot ./.temp/shot.png
 
 timeline:
-	@bin/x-timeline.py > ./timeline.json
-	@printf '%s\n' "$$(python3 -c 'import json;print(len(json.load(open("timeline.json"))))') 条 -> ./timeline.json"
+	@mkdir -p .temp
+	@python3 source-watch/scripts/source_watch.py x --format json > ./.temp/timeline.json
+	@printf '%s\n' "$$(python3 -c 'import json;print(len(json.load(open(".temp/timeline.json"))))') 条 -> ./.temp/timeline.json"
 
 resize:
 	docker exec $(CONTAINER) xrandr --output VNC-0 --mode $(GEOMETRY)
-
-backup:
-	@bin/firefox-profile.py backup
-
-restore:
-	@bin/firefox-profile.py restore $(if $(FILE),$(FILE),)
 
 # 默认只删容器：卷里是 Firefox 的登录态和 shuttle 配置
 clean:
@@ -190,12 +184,11 @@ clean:
 clean-volume:
 	@if [ "$(FORCE)" != "1" ]; then \
 	    echo "这会删除卷 box_box-home，Firefox 登录态与 shuttle 配置一起没掉。"; \
-	    echo "确认请用：make clean-volume FORCE=1（会先自动备份 profile）"; \
+	    echo "确认请用：make clean-volume FORCE=1"; \
 	    exit 1; \
 	fi
-	docker exec $(CONTAINER) true 2>/dev/null && bin/firefox-profile.py backup || true
 	docker compose down -v
-	@echo "容器与卷已删除；最近备份在 ./backups（make restore 需要容器已重建）"
+	@echo "容器与卷已删除"
 
 clean-image:
 	docker rmi $(REF) || true

@@ -25,7 +25,7 @@ TRANSPORT = os.path.join(REPO, "bin", "shuttle-mcp.sh")
 CONTAINER = os.environ.get("SHUTTLE_CONTAINER", "shuttle-box")
 
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "source-watch", "scripts"))
 from shuttle_client import Client                            # noqa: E402
 
 
