@@ -6,6 +6,7 @@
 
 [defaults]
 every = "1d"
+seen_keep_days = 60                      # 全局默认：已读记录保留 60 天
 
 [sources.youtube]
 type = "youtube"
@@ -15,13 +16,15 @@ long_media_seconds = 3600                # 超过只落元数据，不转写
 
 [sources.x]
 type = "x"
-every = "6h"
-screens = 4                             # 每次滚动几屏，约每屏 4–8 条帖子
+every = "3h"
+screens = 8                             # 每次滚动几屏，约每屏 4–8 条帖子
 tabs = ["Investment", "AI + Semiconductors"]   # Home 的页内标签；空数组 = Home 当前那一栏
 accounts = []                           # 账号时间线，写法 ["@handle", ...]
+seen_keep_days = 15                     # 推文量大，只记最近 15 天
 
 [sources.wx]
 type = "wechat"
-every = "1d"
+every = "23h"
 accounts = ["Kevin策略研究"]             # 多个公众号就写多个
 count = 1                               # 每个账号读最新几篇
+seen_keep_days = 15                     # 文章量小但更新快，只记最近 15 天

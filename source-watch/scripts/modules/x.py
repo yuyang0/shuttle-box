@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .base import Ctx, desk
+from .base import Ctx, desk, now_iso, refresh_seen
 
 CONTAINER = os.environ.get("SHUTTLE_CONTAINER", "shuttle-box")
 X_TAB = re.compile(r"/ X$")          # Firefox 的标签标题以站点名结尾
@@ -44,7 +44,11 @@ COUNT = re.compile(r"(\d[\d,]*)\s*(repl(?:y|ies)|reposts?|likes?|bookmarks?|view
 NAME_NOISE = re.compile(r"\s*Provides details about protected accounts\.?", re.I)
 VISIBLE_URL = re.compile(r"(?:https?://|(?<![\w@.])(?:x|twitter)\.com/)[^\s\u2026]+")
 HOME_TITLES = ("Home / X", "首页 / X")
-SEEN_CAP = 5000
+UNREAD = re.compile(r"^\(\d+\)\s*")          # Firefox 会把未读数写成 "(1) Home / X"
+
+
+def is_home_title(title):
+    return any(UNREAD.sub("", title).startswith(t) for t in HOME_TITLES)
 
 
 # ───────────────────────── Firefox / 时间线 ─────────────────────────
@@ -179,7 +183,7 @@ def click_home(title, timeout=30):
         desk("key", f"window={title}", "keys=h")
         time.sleep(2)
         title = current_window()
-        if any(title.startswith(t) for t in HOME_TITLES):
+        if is_home_title(title):
             return title
         try:
             found = desk("find", f"name={name}").get("found") or []
@@ -190,7 +194,7 @@ def click_home(title, timeout=30):
                 desk("act", f"id={node['id']}", "action=click")
                 time.sleep(3)
                 title = current_window()
-                if any(title.startswith(t) for t in HOME_TITLES):
+                if is_home_title(title):
                     return title
                 break
     print(f"warning: could not reach Home (title={title!r}, was {before!r})", file=sys.stderr)
@@ -222,8 +226,37 @@ def snapshot(title, chars=200000):
     return desk("snapshot", f"window={title}", "urls=true", f"max_chars={chars}")
 
 
+def active_document(nodes):
+    """窗口树里包含所有标签页的文档；正在显示的那个带 showing（被聚焦的还有 focused）。"""
+    docs = [n for n in nodes if n.get("role") == "document"]
+    if not docs:
+        return None
+    for state in ("focused", "showing"):
+        for node in docs:
+            if state in (node.get("states") or []):
+                return node.get("ref")
+    return docs[-1].get("ref")
+
+
+def under_document(nodes, ref):
+    by_ref = {n.get("ref"): n for n in nodes}
+    kept = []
+    for node in nodes:
+        parent = node.get("parent")
+        while parent is not None and parent != -1:
+            if parent == ref:
+                kept.append(node)
+                break
+            ancestor = by_ref.get(parent)
+            parent = ancestor.get("parent") if ancestor else None
+    return kept
+
+
 def posts_in(nodes):
-    """按文档顺序返回每个帖子的 (节点 id, 可访问名, permalink)。"""
+    """按文档顺序返回当前标签页里每个帖子的 (节点 id, 可访问名, permalink)。"""
+    ref = active_document(nodes)
+    if ref is not None:
+        nodes = under_document(nodes, ref)     # 后台标签的文档也在这棵树里，必须只读当前的
     children = {}
     for node in nodes:
         children.setdefault(node.get("parent", -1), []).append(node)
@@ -264,48 +297,38 @@ def first_post(title):
     return posts[0][1] if posts else None
 
 
-def select_tab(title, tab, timeout=20):
-    """选页内时间线标签（如 Following）；标题不变，靠选中态和首帖变化确认。"""
+def active_nodes(title):
+    """当前窗口的树里，只取当前标签页的那部分。"""
+    nodes = snapshot(title).get("nodes") or []
+    ref = active_document(nodes)
+    return under_document(nodes, ref) if ref is not None else nodes
+
+
+def select_tab(title, tab, timeout=25):
+    """选当前标签页里的页内时间线（如 Investment）；后台标签的同名标签不算。"""
     if not tab:
-        return
-    desk("key", f"window={title}", "keys=ctrl+Home")
-    time.sleep(1.5)
+        return True
     before = first_post(title)
     deadline = time.time() + timeout
-    while True:
-        try:
-            found = desk("find", f"name={tab}").get("found") or []
-        except RuntimeError:
-            found = []
-        for node in found:
-            if node.get("role") != "tab":
-                continue
-            if "selected" in (node.get("states") or []):
-                return
-            try:
-                desk("act", f"id={node['id']}", "action=click")
-            except RuntimeError:
-                desk("press", f"id={node['id']}")
-            switch_deadline = time.time() + 15
-            while time.time() < switch_deadline:
-                try:
-                    again = desk("find", f"name={tab}").get("found") or []
-                except RuntimeError:
-                    again = []
-                if any("selected" in (n.get("states") or []) for n in again):
-                    time.sleep(1.5)
-                    return
-                now = first_post(title)
-                if now and now != before:
-                    time.sleep(1.5)
-                    return
-                time.sleep(1)
-            print(f"warning: tab {tab!r} did not change the timeline", file=sys.stderr)
-            return
-        if time.time() >= deadline:
-            print(f"warning: no tab named {tab!r}", file=sys.stderr)
-            return
-        time.sleep(1)
+    clicked = False
+    while time.time() < deadline:
+        node = next((n for n in active_nodes(title)
+                     if n.get("role") == "tab" and (n.get("name") or "").strip() == tab), None)
+        if node is None:
+            time.sleep(1)
+            continue
+        if "selected" in (node.get("states") or []):
+            return True
+        if not clicked:
+            desk("focus", f"window={title}")
+            desk("act", f"id={node['id']}", "action=click")
+            clicked = True
+        now = first_post(title)
+        if clicked and now and now != before:
+            return True
+        time.sleep(1.5)
+    print(f"warning: 切不到时间线 {tab!r}", file=sys.stderr)
+    return False
 
 
 def collect(title, screens, pause=3.5):
@@ -506,10 +529,10 @@ def run(ctx: Ctx) -> list[Path]:
             unique.setdefault(post_id(post), {**post, "section": label})
 
     state = ctx.state()
-    state.setdefault("seen", [])
-    state.setdefault("primed", False)
-    if not state["primed"]:
-        state["seen"] = (state["seen"] + [i for i in unique if i not in set(state["seen"])])[-SEEN_CAP:]
+    refresh_seen(ctx, state)              # 只保留 seen_keep_days 天内的记录
+    if not state.get("primed"):
+        for iid in unique:
+            state["seen"][iid] = now_iso()
         state["primed"] = True
         ctx.save_state(state)
         print(f"[prime] {ctx.name}: 把当前 {len(unique)} 条帖子标记为已读", file=sys.stderr)
@@ -530,7 +553,8 @@ def run(ctx: Ctx) -> list[Path]:
     if output is None:
         return []
 
-    state["seen"] = (state["seen"] + list(fresh))[-SEEN_CAP:]
+    for iid in fresh:
+        state["seen"][iid] = now_iso()
     ctx.save_state(state)
     print(f"- 新增 {len(fresh)} 条帖子 → {output.name}", file=sys.stderr)
     return [output]

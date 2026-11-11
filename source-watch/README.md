@@ -4,7 +4,7 @@
 
 `config.toml` 里每个 `[sources.<名字>]` 一节就是一个信息源（YouTube 频道、X 时间线、公众号）；
 总入口按 `every` 判断该源是否到期，到期就调用它对应的模块抓取，产物落在 `output/<名字>/`。
-定时任务（每 6 小时）把本轮产物写成摘要，建成飞书文档并发到 `investment` 群。
+定时任务（每 4 小时）把本轮产物写成摘要，建成飞书文档并发到 `investment` 群。
 
 ## 目录
 
@@ -51,6 +51,7 @@ python3 scripts/source_watch.py yt --channel @handle --limit 5   # 临时列一�
 ```toml
 [defaults]
 every = "1d"                 # 公共默认值；源内同名键优先
+seen_keep_days = 60          # 已读记录保留多少天（全局默认）
 
 [sources.youtube]
 type = "youtube"             # 模块名，见 scripts/modules/
@@ -60,16 +61,18 @@ long_media_seconds = 3600    # 超过只落元数据，不转写
 
 [sources.x]
 type = "x"
-every = "6h"
-screens = 4                  # 滚几屏，每屏约 4–8
+every = "3h"
+screens = 8                  # 滚几屏，每屏约 4–8
 tabs = []                    # Home 的页内标签，如 ["Following"]；空 = Home 当前那一栏
-accounts = []                # 账号时间线，如 ["@handle", ...] 条
+accounts = []                # 账号时间线，如 ["@handle", ...]
+seen_keep_days = 15          # X 推文量大，只记最近 15 天
 
 [sources.wx]
 type = "wechat"
-every = "1d"
-accounts = ["Kevin策略研究"]  # 多个公众号就写多个
+every = "23h"
+accounts = ["Kevin策略研究"]  # 多个公众号写多个
 count = 1                    # 每个账号读最新几篇
+seen_keep_days = 15          # 公众号更新快，只记最近 15 天
 ```
 
 - **优先级**：命令行参数 > 配置文件 > 内置默认。`x` / `wx` / `yt` 这些临时子命令默认读对应
@@ -123,6 +126,8 @@ def run(ctx: Ctx) -> list[Path]:
 
 - **一个源，多个频道**：`channels` 是频道列表（ID、`@handle` 或频道 URL）；整节共用一个
   `every`、一条 `last_success` 和一份转写预算，去重游标与队列也共用。
+- **去重**：`state.json` 的 `seen` 记「视频 ID → 发布时间」，只保留最近 `seen_keep_days`
+  （默认 60 天）；旧的纯 ID 列表会自动迁移，过期记录在加载时丢弃。
 - **发现**：频道 RSS `feeds/videos.xml?channel_id=UC…`（最近 15 条，带 `published`）；被限流时回落
   `yt-dlp --flat-playlist`。单个频道列不出来只告警，全部频道都失败才算这个源出错。
 - **转写**：调 `transcribe <url> --engine whisper|sensevoice`；标题/简介含 ≥8 个中日韩字符用
@@ -138,8 +143,17 @@ def run(ctx: Ctx) -> list[Path]:
   `last_success`，不按标签或账号分别计时。
 - **读取**：经 `scripts/shuttle_client.py` 调 shuttle 的 `desk`，把 Firefox 带到 Home 切标签，
   或直接用地址栏打开 `x.com/<handle>`，滚动读取可访问树里的帖子与 permalink。
+- **只读当前标签页**：Firefox 的窗口树同时包含所有标签页的文档，后台文档没有 `showing`；
+  解析按活动文档裁剪，否则会把后台旧标签的帖子当成当前页内容。
+- **时间线标签**：`tabs` 里的标签（如 `Investment`）是 SPA 异步渲染的，模块会等标签栏出现，
+  在活动文档里找对应的 `tab` 节点点击，用选中态或首帖变化确认；找不到就告警。
+- **标签页**：窗口里已有 x.com 标签就复用，没有才新开一个；读完不关，下一轮继续用，避免反复开关。
+  后台标签的文档也在窗口树里，所以解析只取带 `showing` 的当前文档，否则会读到旧标签的帖子；
+  不复用、不切换用户已有的 X 标签，标签总数不变。窗口被用户动过导致数量对不上时，宁可不关
+  也不误关用户的页面。
 - **去重**：permalink 里的 status id 为主键；没有 permalink 的帖子（纯图片、被限流的卡片）用
   作者+正文哈希兜底，所以同一帖子不会因为相对时间变化被重复记录，多个入口读到同一条也只留一次。
+  已读记录只保留最近 `seen_keep_days`（默认 60 天）。
 - **临时查看**：`source_watch.py yt --channel … --limit 5` 只列条目，不落盘、不动游标；
   加 `--meta` 才逐条取时长与简介。
 - **产物**：一次运行一个 `timeline/<date>-<HHMMSS>.md`，按入口分节（`## Home · Following`、
@@ -152,13 +166,14 @@ def run(ctx: Ctx) -> list[Path]:
   互斥）。
 - **读取**：驱动微信客户端（Qt 外壳 + 内嵌 Chromium），搜索账号 → 进主页 → 打开「文章」→
   点卡片 → 从 Chromium 的段落节点读正文。微信必须已经打开并登录，模块从不启动或重启它。
-- **去重**：优先用 mp.weixin.qq.com 永久令牌，老式查询串用 `mid_idx`，都没有则按账号+标题哈希。
+- **去重**：优先用 mp.weixin.qq.com 永久令牌，老式查询串用 `mid_idx`，都没有则按账号+标题哈希；
+  已读记录只保留最近 `seen_keep_days`（默认 60 天）。
 - **产物**：一篇一个 `articles/<date>-<id>.md`；正文已经是文字，不走转写。
 - **标签**：默认关掉本轮打开的浏览器标签；`source_watch.py wx --close-tabs` 清理历史遗留。
 
 ## 每日摘要任务
 
-cron 任务每 6 小时（00/06/12/18）执行 `run --json`，摘要的对象是 `pending.json` 里的文件（本轮
+cron 任务每 4 小时（00/04/08/12/16/20）执行 `run --json`，摘要的对象是 `pending.json` 里的文件（本轮
 新产物 + 以前没摘完的），任务 prompt 的唯一来源是 `TASK.md`（cron 配置里的 prompt 只写「读取
 TASK.md 并照做」）。摘要写成 `output/summaries/<YYYY-MM-DD-HHMMSS>.md`、发成飞书文档并转发到
 `investment` 群（群消息正文就是摘要本身，文档链接只附在末尾），全部成功后才 `pending --clear`；

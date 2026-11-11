@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .base import Ctx, desk
+from .base import Ctx, desk, now_iso, refresh_seen
 
 DEFAULT_ACCOUNT = "Kevin策略研究"
 ARTICLE_URL = re.compile(r"^https://mp\.weixin\.qq\.com/s")
@@ -35,7 +35,6 @@ TOKEN = re.compile(r"/s/([A-Za-z0-9_-]{6,})")
 NOISE = re.compile(r"^(元宝提供|由微信提供翻译支持.*|问AI|预览时标签不可点|阅读原文|留言|"
                    r"写留言|赞|在看|分享|全部|贴图|文章|视频号|置顶|已关注|私信|"
                    r"选择要提醒的账号|暂无评论|微信扫一扫.*)$")
-SEEN_CAP = 5000
 
 
 # ───────────────────────── 窗口与导航 ─────────────────────────
@@ -100,7 +99,11 @@ def shell_window():
 def focus_shell(shell, attempts=4):
     """把微信提到最前并确认真的在前面：点偏了会点到面板上。"""
     for _ in range(attempts):
-        desk("focus", f"window={shell.get('title') or ''}", f"pid={shell['pid']}")
+        # 标题经常是空串（AGENTS 里写明按 pid 寻址），传 window="" 反而找不到窗口
+        if shell.get("title"):
+            desk("focus", f"window={shell['title']}", f"pid={shell['pid']}")
+        else:
+            desk("focus", f"pid={shell['pid']}")
         time.sleep(1)
         active = [w for w in windows() if w.get("active")]
         if active and "wechat" in str(active[0].get("app", "")).lower():
@@ -256,7 +259,11 @@ def close_tab(pid, wait=1.5):
     wins = [w for w in windows() if w.get("app") == "WeChatAppEx" and w.get("pid") == pid]
     if not wins:
         return False
-    desk("focus", f"window={wins[0].get('title') or ''}", f"pid={pid}")
+    title = wins[0].get("title")
+    if title:
+        desk("focus", f"window={title}", f"pid={pid}")
+    else:
+        desk("focus", f"pid={pid}")       # 空标题窗口只能按 pid 找
     desk("key", "keys=ctrl+w")
     time.sleep(wait)
     return True
@@ -272,19 +279,27 @@ def tab_count(pid):
 
 
 def browser_pid():
-    """当前承载页面的 Chromium 进程；没有窗口时返回 None。"""
-    return next((w["pid"] for w in windows()
-                 if w.get("app") == "WeChatAppEx" and w.get("title")), None)
+    """当前承载页面的 Chromium 进程；没有窗口时返回 None。
+
+    不按标题过滤：WeChatAppEx 的窗口标题经常是空串，加了过滤会把「有窗口」误判成「没窗口」。
+    """
+    return next((w["pid"] for w in windows() if w.get("app") == "WeChatAppEx"), None)
 
 
 def close_to_baseline(pid, baseline, label=""):
-    """把本轮打开的标签关回基线，最多试 4 次；关不动就停，别误关客户端自带的标签。"""
+    """把本轮打开的标签关回基线，最多试 4 次；关不动就停，别误关客户端自带的标签。
+
+    标签是清理动作，失败只告警：不能因为窗口标题变化或桌面抖动丢掉已经读完的正文。
+    """
     if pid is None:
         return
-    for _ in range(4):
-        if tab_count(pid) <= baseline or not close_tab(pid):
-            break
-    print(f"   {label} tabs -> {tab_count(pid)}（基线 {baseline}）", file=sys.stderr)
+    try:
+        for _ in range(4):
+            if tab_count(pid) <= baseline or not close_tab(pid):
+                break
+        print(f"   {label} tabs -> {tab_count(pid)}（基线 {baseline}）", file=sys.stderr)
+    except RuntimeError as error:
+        print(f"   {label}: 关标签跳过（{error}）", file=sys.stderr)
 
 
 def close_stale_tabs(limit=20):
@@ -363,7 +378,7 @@ def read_articles(accounts: list[str] | None = None, feed: bool = False, count: 
     """读一批账号（或公众号消息流）的文章；每个账号各自关闭自己开的标签。"""
     require_wechat()
     baseline_pid = browser_pid()
-    baseline = tab_count(baseline_pid) if baseline_pid else 0
+    baseline = max(tab_count(baseline_pid), 4) if baseline_pid else 4
     if feed:
         shell = following_feed()
         open_newest_card(shell)
@@ -475,10 +490,10 @@ def run(ctx: Ctx) -> list[Path]:
             items.setdefault(article_id(article["account"], article), article)
 
     state = ctx.state()
-    state.setdefault("seen", [])
-    state.setdefault("primed", False)
-    if not state["primed"]:
-        state["seen"] = (state["seen"] + [i for i in items if i not in set(state["seen"])])[-SEEN_CAP:]
+    refresh_seen(ctx, state)
+    if not state.get("primed"):
+        for iid in items:
+            state["seen"][iid] = now_iso()
         state["primed"] = True
         ctx.save_state(state)
         print(f"[prime] {ctx.name}: 把当前 {len(items)} 篇文章标记为已读", file=sys.stderr)
@@ -496,7 +511,7 @@ def run(ctx: Ctx) -> list[Path]:
         if output is None:
             continue
         written.append(output)
-        state["seen"] = (state["seen"] + [iid])[-SEEN_CAP:]
+        state["seen"][iid] = now_iso()
         ctx.save_state(state)  # 逐篇落盘
     if written:
         print(f"- 新增 {len(written)} 篇文章", file=sys.stderr)

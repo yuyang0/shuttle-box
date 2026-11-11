@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .base import Ctx
+from .base import Ctx, now_iso, refresh_seen
 
 YTDLP = os.environ.get("SOURCEWATCH_YTDLP", "/home/yangyu/.local/bin/yt-dlp")
 TRANSCRIBE = os.environ.get("SOURCEWATCH_TRANSCRIBE", "/home/yangyu/.local/bin/transcribe")
@@ -225,13 +225,15 @@ def run(ctx: Ctx) -> list[Path]:
 
     items = collect_items(channels, limit)
     state = ctx.state()
-    state.setdefault("seen", [])
+    refresh_seen(ctx, state)
     state.setdefault("queue", [])
     state.setdefault("pending_long", {})
 
     # 首次见到这个源：把现有条目标记为已读，不回头处理历史。
     if not state.get("primed"):
-        state["seen"] = sorted({*state["seen"], *(i["id"] for i in items if i.get("id"))})
+        for item in items:
+            if item.get("id"):
+                state["seen"][item["id"]] = item.get("published") or now_iso()
         state["primed"] = True
         ctx.save_state(state)
         print(f"[prime] {ctx.name}: 把 {len(channels)} 个频道的当前 {len(items)} 条标记为已读",
@@ -291,7 +293,7 @@ def run(ctx: Ctx) -> list[Path]:
 
         queue.pop(iid, None)
         if iid not in seen:
-            state["seen"].append(iid)
+            state["seen"][iid] = item.get("published") or now_iso()
             seen.add(iid)
         state["queue"] = [q for q in state["queue"] if q["id"] != iid]
         ctx.save_state(state)  # 逐条落盘：被硬中断也不丢已完成进度

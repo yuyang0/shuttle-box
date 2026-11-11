@@ -45,12 +45,20 @@ python3 -m unittest discover -s tests -v            # 调度与模块的单元�
   命令行显式给出时才覆盖，没给的那项继续用配置。
 - 首次运行只把现有条目标记为已读（`primed`），不处理历史；本轮跑不完的条目留队列下轮继续。
 - YouTube / X / 微信都是单节源：`channels` / `tabs` / `accounts` 只是入口列表，整体只有一个
-  `every`、一条 `last_success`；YouTube 的预算与队列也跨频道共享。X 的产物合并成一个按入口
-  分节的文件，YouTube 与微信仍是一条/一篇一个文件。
-- 摘要语言跟随原文；单条目 3–5 条要点 + 1 句结论；长内容只有 meta 时写「标题 + 简介要点（未转写）」。
+  `every`、一条 `last_success`；YouTube 的预算与队列也跨频道共享。三个源的 `seen` 都只保留最近
+  `seen_keep_days`（默认 60 天），旧格式（纯 ID 列表）在加载时自动升级并裁剪。X 的产物合并成
+  一个按入口分节的文件，YouTube 与微信仍是一条/一篇一个文件。
+- 摘要语言跟随原文。YouTube 转写与公众号文章按 `~/.agents/prompts/long-article-summary.md` 做详细
+  总结（原文的 15%–30%、六段结构、附质量审计），每个条目以原始链接开头；X 先给要点总结，
+  再附按热门度（点赞+转发+回复）排序的表格：作者 / 时间 / 内容概述 / 点赞 / 回复 / 链接。
+  只有 meta 的长视频写「标题 + 简介要点（未转写）」。
 - 转写引擎按内容语言自动选：≥8 个中日韩字符用 `sensevoice`，否则 `whisper`。
 - X 与微信模块直接调 shuttle 的 `desk`（同目录 `scripts/shuttle_client.py`，http → docker →
-  local 自动挑），不 subshell 到别的脚本；微信必须已登录，模块只读窗口、从不启动或重启它，
-  并关掉自己开的标签。
+  local 自动挑），不 subshell 到别的脚本；两者都只碰自己的窗口/标签：X 复用已有的 x.com 标签
+  （没有才新开一个），读完不关，下一轮继续用；不为了抓取反复开关标签或窗口。
+- Firefox 的窗口树里包含**所有**标签页的文档（后台文档 `visible` 但不带 `showing`），所以解析
+  必须先按活动文档裁剪，否则会读到后台旧标签的帖子；页内时间线标签是 SPA 异步渲染的，选中时
+  在活动文档里找 `tab` 节点并点击，用选中态或首帖变化确认；找不到就告警，不冒险按坐标点。
+- 微信必须已登录，模块只读窗口、不启动也不重启它。
 - 不要手改 `last_success.json` 与 `output/*/state.json`；要重跑用 `run --only NAME --force`，
   要清游标用 `reset NAME`。

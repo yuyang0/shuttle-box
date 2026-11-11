@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
@@ -17,6 +17,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from shuttle_client import Client, desk_call            # noqa: E402
 
+DEFAULT_SEEN_KEEP_DAYS = 60
 UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 DURATION = re.compile(r"^\s*(\d+)\s*([smhdw]?)\s*$", re.I)
 
@@ -51,6 +52,50 @@ def parse_time(value: str | None) -> datetime | None:
 
 def now_local() -> datetime:
     return datetime.now().astimezone()
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_stamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def load_seen(state: dict, keep_days: int) -> dict[str, str]:
+    """seen 是 {条目 ID: 时间}；旧格式（ID 列表）按「刚看到」升级，再丢掉 keep_days 天前的记录。"""
+    raw = state.get("seen")
+    if isinstance(raw, list):
+        seen = {str(iid): now_iso() for iid in raw if iid}
+    elif isinstance(raw, dict):
+        seen = {str(k): str(v) for k, v in raw.items()}
+    else:
+        seen = {}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+    kept = {}
+    for iid, stamp in seen.items():
+        parsed = parse_stamp(stamp)
+        if parsed is not None and parsed < cutoff:
+            continue
+        kept[iid] = stamp
+    return kept
+
+
+def refresh_seen(ctx: "Ctx", state: dict) -> None:
+    """按 seen_keep_days 裁剪已读记录；有变化才落盘，免得没产出时白写一次。"""
+    before = state.get("seen")
+    state["seen"] = load_seen(state, int(ctx.config.get("seen_keep_days", DEFAULT_SEEN_KEEP_DAYS)))
+    if state["seen"] != before:
+        ctx.save_state(state)
 
 
 @dataclass

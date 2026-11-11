@@ -9,7 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "source_watch.py"
@@ -307,7 +307,7 @@ class YouTubeModuleTests(unittest.TestCase):
 
         youtube.list_items = listing
         self.assertEqual(youtube.run(self.ctx(channels=["BAD", "OK"])), [])
-        self.assertEqual(json.loads((self.root / "state.json").read_text())["seen"], ["OK-1"])
+        self.assertEqual(list(json.loads((self.root / "state.json").read_text())["seen"]), ["OK-1"])
 
     def test_cli_lists_items_as_json(self):
         youtube.channel_id = lambda target: "UC" + "a" * 22
@@ -370,6 +370,39 @@ class YouTubeModuleTests(unittest.TestCase):
         youtube.list_items = listing
         with self.assertRaises(RuntimeError):
             youtube.run(self.ctx(channels=["A", "B"]))
+
+    def test_legacy_seen_list_is_migrated(self):
+        (self.root / "state.json").write_text(json.dumps({
+            "primed": True, "seen": ["legacy-video"], "queue": [], "pending_long": {}}))
+        youtube.fetch_text = lambda *a, **k: self.RSS
+        youtube.list_items = lambda uid, limit=15: []
+        youtube.run(self.ctx())
+        seen = json.loads((self.root / "state.json").read_text())["seen"]
+        self.assertIsInstance(seen, dict)
+        self.assertIn("legacy-video", seen)      # 旧记录按「刚看到」保留，不会被立刻清掉
+
+    def test_seen_drops_records_older_than_keep_days(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=61)).isoformat(timespec="seconds")
+        recent = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
+        (self.root / "state.json").write_text(json.dumps({
+            "primed": True, "seen": {"ancient": old, "fresh": recent},
+            "queue": [], "pending_long": {}}))
+        youtube.fetch_text = lambda *a, **k: self.RSS
+        youtube.list_items = lambda uid, limit=15: []
+        youtube.run(self.ctx())
+        seen = json.loads((self.root / "state.json").read_text())["seen"]
+        self.assertNotIn("ancient", seen)
+        self.assertIn("fresh", seen)
+
+    def test_keep_days_is_configurable(self):
+        stamp = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(timespec="seconds")
+        (self.root / "state.json").write_text(json.dumps({
+            "primed": True, "seen": {"ten-days": stamp}, "queue": [], "pending_long": {}}))
+        youtube.fetch_text = lambda *a, **k: self.RSS
+        youtube.list_items = lambda uid, limit=15: []
+        youtube.run(self.ctx(seen_keep_days=7))
+        seen = json.loads((self.root / "state.json").read_text())["seen"]
+        self.assertNotIn("ten-days", seen)
 
     def test_long_media_keeps_meta_only(self):
         youtube.fetch_text = lambda *a, **k: self.RSS

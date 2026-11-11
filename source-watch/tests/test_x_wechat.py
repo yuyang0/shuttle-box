@@ -70,7 +70,7 @@ class XTests(ModuleCase):
         self.assertEqual(x.run(self.ctx("x", tabs=["Following"], accounts=["@Beta"])), [])
         state = self.state()
         self.assertTrue(state["primed"])
-        self.assertEqual(state["seen"], ["111", "222"])
+        self.assertEqual(sorted(state["seen"]), ["111", "222"])
         self.assertFalse((self.root / "timeline").exists())
 
     def test_new_posts_render_sections(self):
