@@ -54,10 +54,14 @@ python3 -m unittest discover -s tests -v            # 调度与模块的单元�
   只有 meta 的长视频写「标题 + 简介要点（未转写）」。
 - 转写引擎按内容语言自动选：≥8 个中日韩字符用 `sensevoice`，否则 `whisper`。
 - X 与微信模块直接调 shuttle 的 `desk`（同目录 `scripts/shuttle_client.py`，http → docker →
-  local 自动挑），不 subshell 到别的脚本；两者都只碰自己的窗口/标签：X 复用已有的 x.com 标签
-  （没有才新开一个），读完不关，下一轮继续用；不为了抓取反复开关标签或窗口。
+  local 自动挑），不 subshell 到别的脚本。
+- X 每轮开一个**全新**的 Firefox 窗口（`launch … args=["--new-window", "https://x.com/home"]`），
+  窗口里只保持一个 x.com 标签；抓完 `ctrl+w` 关掉唯一标签（标签没了窗口随之关闭），再用窗口 id
+  确认它真的消失。读取一律 `snapshot id=<窗口 id>`：同一进程里的窗口可以同名，标题挑不准。
+  发按键、关闭之前先用标题探测确认 `window=` 挑中的就是本轮窗口，不是就报错停手，不动用户的标签。
 - Firefox 的窗口树里包含**所有**标签页的文档（后台文档 `visible` 但不带 `showing`），所以解析
-  必须先按活动文档裁剪，否则会读到后台旧标签的帖子；页内时间线标签是 SPA 异步渲染的，选中时
+  必须先按活动文档裁剪，否则会读到后台旧标签的帖子；新窗口的树里还可能残留一个 `New Tab` 文档，
+  活动文档找不到选中态时按文档名以 `/ X` 结尾兜底；页内时间线标签是 SPA 异步渲染的，选中时
   在活动文档里找 `tab` 节点并点击，用选中态或首帖变化确认；找不到就告警，不冒险按坐标点。
 - 微信必须已登录，模块只读窗口、不启动也不重启它。
 - 不要手改 `last_success.json` 与 `output/*/state.json`；要重跑用 `run --only NAME --force`，

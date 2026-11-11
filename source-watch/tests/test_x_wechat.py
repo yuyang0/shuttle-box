@@ -50,16 +50,28 @@ class XTests(ModuleCase):
         super().setUp()
         self.home_calls = []
         self.account_calls = []
-        self.addCleanup(setattr, x, "read_home", x.read_home)
-        self.addCleanup(setattr, x, "read_account", x.read_account)
+        self.windows_opened = []
+        self.windows_closed = []
+        for name in ("read_home", "read_account", "open_window", "close_window"):
+            self.addCleanup(setattr, x, name, getattr(x, name))
+        x.open_window = self.open_window
+        x.close_window = self.close_window
+
+    def open_window(self, *args, **kwargs):
+        self.windows_opened.append((args, kwargs))
+        return x.Window("1.1/1")
+
+    def close_window(self, win, *args, **kwargs):
+        self.windows_closed.append(win.id)
+        return True
 
     def feed(self, posts):
-        def fake_home(tab="", screens=6, window=None):
-            self.home_calls.append((tab, screens, window))
+        def fake_home(win, tab="", screens=6):
+            self.home_calls.append((tab, screens))
             return "Home / X", posts
 
-        def fake_account(handle, screens=6, window=None):
-            self.account_calls.append((handle, screens, window))
+        def fake_account(win, handle, screens=6):
+            self.account_calls.append((handle, screens))
             return "Beta / X", posts
 
         x.read_home = fake_home
@@ -81,8 +93,8 @@ class XTests(ModuleCase):
                     "text": "时间线里的新帖", "url": "https://x.com/G/status/333"}
         account_new = {"handle": "H", "author": "Hotel", "time": "now",
                        "text": "账号里的新帖", "url": "https://x.com/H/status/444"}
-        x.read_home = lambda tab="", screens=6, window=None: ("Home / X", POSTS + [home_new])
-        x.read_account = lambda handle, screens=6, window=None: ("Beta / X", POSTS + [account_new])
+        x.read_home = lambda win, tab="", screens=6: ("Home / X", POSTS + [home_new])
+        x.read_account = lambda win, handle, screens=6: ("Beta / X", POSTS + [account_new])
         files = x.run(self.ctx("x", **config))
         self.assertEqual(len(files), 1)
         body = files[0].read_text()
@@ -99,14 +111,20 @@ class XTests(ModuleCase):
     def test_no_sections_reads_home(self):
         self.feed(POSTS)
         x.run(self.ctx("x", tabs=[], accounts=[]))
-        self.assertEqual(self.home_calls, [("", 6, None)])
+        self.assertEqual(self.home_calls, [("", 6)])
         self.assertEqual(self.account_calls, [])
 
     def test_config_reaches_readers(self):
         self.feed(POSTS)
-        x.run(self.ctx("x", tabs=["Following"], accounts=["@Beta"], screens=2, window="Home"))
-        self.assertEqual(self.home_calls[0], ("Following", 2, "Home"))
-        self.assertEqual(self.account_calls[0], ("@Beta", 2, "Home"))
+        x.run(self.ctx("x", tabs=["Following"], accounts=["@Beta"], screens=2))
+        self.assertEqual(self.home_calls[0], ("Following", 2))
+        self.assertEqual(self.account_calls[0], ("@Beta", 2))
+
+    def test_window_closed_after_a_run(self):
+        self.feed(POSTS)
+        x.run(self.ctx("x", tabs=["Following"], accounts=["@Beta"]))
+        self.assertEqual(len(self.windows_opened), 1)
+        self.assertEqual(self.windows_closed, ["1.1/1"])
 
     def test_handle_of(self):
         self.assertEqual(x.handle_of("@foo"), "foo")
@@ -114,14 +132,17 @@ class XTests(ModuleCase):
         self.assertEqual(x.handle_of("https://twitter.com/foo"), "foo")
 
     def test_not_due_never_reads(self):
+        x.open_window = lambda *a, **k: self.fail("未到期不该开窗")
         x.read_home = lambda *a, **k: self.fail("未到期不该驱动 Firefox")
         x.read_account = lambda *a, **k: self.fail("未到期不该驱动 Firefox")
         self.assertEqual(x.run(self.not_due()), [])
+        self.assertEqual(self.windows_closed, [])
 
-    def test_reader_failure_propagates(self):
+    def test_reader_failure_propagates_and_closes(self):
         x.read_home = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no Firefox window"))
         with self.assertRaises(RuntimeError):
             x.run(self.ctx("x"))
+        self.assertEqual(self.windows_closed, ["1.1/1"])
 
     def test_cli_uses_config_by_default(self):
         self.feed(POSTS)
@@ -129,18 +150,90 @@ class XTests(ModuleCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             code = x.main([], config={"tabs": ["Following"], "accounts": ["@Beta"], "screens": 2})
         self.assertEqual(code, 0)
-        self.assertEqual(self.home_calls, [("Following", 2, None)])
-        self.assertEqual(self.account_calls, [("@Beta", 2, None)])
+        self.assertEqual(self.home_calls, [("Following", 2)])
+        self.assertEqual(self.account_calls, [("@Beta", 2)])
         self.assertEqual([s["source"] for s in json.loads(out.getvalue())],
                          ["Home · Following", "@Beta"])
+        self.assertEqual(self.windows_closed, ["1.1/1"])
 
     def test_cli_overrides_config(self):
         self.feed(POSTS)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             x.main(["--tab", "Investment", "--screens", "1"],
                    config={"tabs": ["Following"], "accounts": ["@Beta"], "screens": 4})
-        self.assertEqual(self.home_calls, [("Investment", 1, None)])
-        self.assertEqual(self.account_calls, [("@Beta", 1, None)])   # 没覆盖的仍取配置
+        self.assertEqual(self.home_calls, [("Investment", 1)])
+        self.assertEqual(self.account_calls, [("@Beta", 1)])   # 没覆盖的仍取配置
+
+
+class WindowLifecycleTests(ModuleCase):
+    """窗口的开关只碰本轮的窗口：新窗口靠 id 认，关窗前先确认按标题挑中的是它。"""
+
+    def patch_desk(self, fake):
+        self.addCleanup(setattr, x, "desk", x.desk)
+        x.desk = fake
+
+    def test_wait_new_window_takes_the_fresh_one(self):
+        seen = []
+
+        def fake(*args):
+            seen.append(args)
+            old = {"id": "1.1/0", "title": "old", "app": "firefox-bin"}
+            if len(seen) == 1:
+                return [old]
+            return [old, {"id": "1.1/1", "title": "Home / X — Mozilla Firefox",
+                          "app": "firefox-bin"}]
+
+        self.patch_desk(fake)
+        self.assertEqual(x.wait_new_window({"1.1/0"}, timeout=3), "1.1/1")
+
+    def test_take_front_refuses_a_foreign_window(self):
+        def fake(*args):
+            if args[0] == "windows":
+                return [{"id": "1.1/1", "title": "Home / X — Mozilla Firefox",
+                         "app": "firefox-bin"}]
+            return {"window": {"id": "1.1/9"}}
+
+        self.patch_desk(fake)
+        with self.assertRaises(x.WindowMismatch):
+            x.take_front(x.Window("1.1/1"))
+
+    def test_close_window_sends_ctrl_w_until_the_window_is_gone(self):
+        state = {"alive": True, "keys": []}
+
+        def fake(*args):
+            verb = args[0]
+            if verb == "windows":
+                return ([{"id": "1.1/1", "title": "Home / X — Mozilla Firefox",
+                          "app": "firefox-bin"}] if state["alive"] else [])
+            if verb == "snapshot":
+                return {"window": {"id": "1.1/1"}, "nodes": [], "text": ""}
+            if verb == "key":
+                state["keys"].append(args)
+                state["alive"] = False
+            return {"ok": True}
+
+        self.patch_desk(fake)
+        self.assertTrue(x.close_window(x.Window("1.1/1")))
+        self.assertEqual(state["keys"],
+                         [("key", "window=Home / X — Mozilla Firefox", "keys=ctrl+w")])
+
+    def test_active_document_skips_a_stray_new_tab(self):
+        nodes = [
+            {"ref": 1, "role": "window", "parent": -1},
+            {"ref": 2, "role": "document", "name": "(1) Home / X", "parent": 1},
+            {"ref": 3, "role": "document", "name": "New Tab", "parent": 1},
+        ]
+        self.assertEqual(x.active_document(nodes), 2)
+        self.assertEqual(x.document_name(nodes), "(1) Home / X")
+
+    def test_active_document_prefers_the_showing_one(self):
+        nodes = [
+            {"ref": 1, "role": "window", "parent": -1},
+            {"ref": 2, "role": "document", "name": "Home / X", "parent": 1},
+            {"ref": 3, "role": "document", "name": "New Tab", "parent": 1,
+             "states": ["showing"]},
+        ]
+        self.assertEqual(x.active_document(nodes), 3)
 
 
 WX_ARTICLES = [

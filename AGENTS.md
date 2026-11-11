@@ -75,7 +75,8 @@ source-watch/scripts/shuttle_client.py --transport http|docker|local   # which t
   account page and article text, which is where paragraphs come from.
 - **Browsers tabs must be cleaned up.** The 微信 module closes the tabs it opened, and
   `source_watch.py wx --close-tabs` clears what earlier runs left behind; four `关闭` buttons mean
-  one tab left.
+  one tab left. The X module opens its own Firefox window per run (`--new-window`) and closes it
+  when the run ends, so no browser state outlives a scrape.
 - **CI builds on tags only**; a push to `main` builds nothing. Local builds need `--network=host`
   plus mirror and proxy, the runner needs none.
 - **noVNC/websockify stay upstream** (pinned sha256, venv); the distro packages pull in nodejs
