@@ -23,7 +23,7 @@ scripts/source_watch.py         # 总入口：读配置、逐源调度、汇总�
 scripts/shuttle_client.py       # MCP 客户端：http / docker exec stdio / local stdio
 scripts/modules/base.py         # Ctx：到期判断、产物落盘、源私有状态、desk 调用
 scripts/modules/youtube.py      # YouTube 频道模块
-scripts/modules/x.py            # X 时间线模块（驱动 Firefox）
+scripts/modules/x.py            # X 时间线模块（驱动 Firefox 或 Edge）
 scripts/modules/wechat.py       # 公众号模块（驱动微信客户端）
 tests/test_source_watch.py      # 调度与模块的单元测试
 TASK.md                         # 每日任务 prompt（cron 任务配置只指向它）
@@ -149,9 +149,14 @@ def run(ctx: Ctx) -> list[Path]:
   `New Tab` 文档，找不到选中态时按文档名以 `/ X` 结尾兜底。
 - **时间线标签**：`tabs` 里的标签（如 `Investment`）是 SPA 异步渲染的，模块会等标签栏出现，
   在活动文档里找对应的 `tab` 节点点击，用选中态或首帖变化确认；找不到就告警。
-- **窗口**：每轮用 `--new-window` 开一个全新的 Firefox 窗口打开 `x.com/home`，窗口里只保持这一个
-  标签；抓完 `ctrl+w` 关掉标签（只剩一个标签时窗口随之关闭），再按窗口 id 确认它真的消失。因此
-  不碰用户已有的窗口和标签；万一按标题挑中了别的窗口，模块报错停手，不冒险关别人的页面。
+- **窗口**：每轮新开一个窗口打开 `x.com/home`，窗口里只保持这一个标签；抓完 `ctrl+w` 关掉标签
+  （只剩一个标签时窗口随之关闭），再按窗口 id 确认它真的消失。因此不碰用户已有的窗口和标签；
+  万一按标题挑中了别的窗口，模块报错停手，不冒险关别人的页面。
+- **浏览器**：`browser` 配置或 `--browser firefox|edge` 选择，默认 Edge。Edge 用
+  `--app=https://x.com/home` 开无地址栏的 app 窗口——Chromium 普通窗口的标题会带上 profile 名、
+  和用户自己开着的 Edge 窗口完全重名，app 窗口的标题只有页面名，既唯一又稳定；代价是没有地址栏，
+  换页面（`--account`）靠换窗口：先开新窗口，再关旧的。`--browser firefox` 换回 Firefox 的普通窗口
+  （`--new-window`）。
 - **去重**：permalink 里的 status id 为主键；没有 permalink 的帖子（纯图片、被限流的卡片）用
   作者+正文哈希兜底，所以同一帖子不会因为相对时间变化被重复记录，多个入口读到同一条也只留一次。
   已读记录只保留最近 `seen_keep_days`（默认 60 天）。

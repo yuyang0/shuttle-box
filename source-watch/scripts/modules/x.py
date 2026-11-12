@@ -1,11 +1,17 @@
-"""X 时间线：每轮开一个全新的 Firefox 窗口，读 Home / Following 的帖子，按 status id 去重后落盘。
+"""X 时间线：每轮开一个全新的浏览器窗口，读 Home / Following 的帖子，按 status id 去重后落盘。
 
-一次运行 = 一个窗口一个标签：`--new-window` 打开 x.com/home，抓完 `ctrl+w` 关掉标签（只剩一个
-标签时窗口随之关闭）。产物：`timeline/<date>-<HHMMSS>.md`，一次运行一个文件，只有本轮确有新帖才写。
+一次运行 = 一个窗口一个标签，抓完关掉这个窗口。浏览器由 `browser` 配置或 `--browser` 决定，
+默认 Edge：Edge 用 `--app=` 开无地址栏的 app 窗口（标题就是 `Home / X`，和用户自己的 Edge 窗口
+不会重名），关窗发 `ctrl+w`，换页面因为没有地址栏要换窗口（`swap_window`）；`--browser firefox`
+换成 Firefox 的普通窗口（`--new-window`，同样 `ctrl+w` 关）。两者都走 AT-SPI，帖子靠 permalink
+认，`post_id` 与去重逻辑一致。
+
+产物：`timeline/<date>-<HHMMSS>.md`，一次运行一个文件，只有本轮确有新帖才写。
 
 临时读一份（不落盘、不动游标）：
 
     cd scripts && python3 -m modules.x --tab Following --screens 2 --format md
+    cd scripts && python3 -m modules.x --browser firefox --screens 2 --format md
 """
 from __future__ import annotations
 
@@ -49,6 +55,46 @@ def is_home_title(title):
     return any(UNREAD.sub("", title).startswith(t) for t in HOME_TITLES)
 
 
+@dataclass(frozen=True)
+class Browser:
+    """浏览器之间仅有的几处差别，其余流程共用。
+
+    match：窗口列表里 app 字段包含的串（Firefox 是 `firefox-bin`，Edge 是 `msedge`）。
+    tab_switch：切页内标签的方式；Chromium 的 AT-SPI `action=click` 返回成功但不切，得用 press。
+    close_by：关窗先发 `ctrl+w`（key），还是直接点窗口上的关闭按钮（button）。
+    key_window：发送按键时是否带 `window=<标题>`。
+    window_hint：新窗口标题里必须出现的字样，用来跳过“还原页面”这类对话框。
+    app_mode：用 `--app=<url>` 开一个无地址栏的窗口。Chromium 的普通窗口标题会带上 profile 名，
+    和用户自己开着的窗口完全重名；app 窗口的标题只有页面名（`Home / X`），既唯一又稳定。
+    代价是没有地址栏，换页面得换窗口（见 swap_window）。
+    """
+
+    name: str
+    launch: str
+    match: str
+    tab_switch: str = "click"
+    close_by: str = "key"
+    key_window: bool = True
+    window_hint: str = ""
+    app_mode: bool = False
+
+
+BROWSERS = {
+    "firefox": Browser("firefox", "firefox", "firefox"),
+    "edge": Browser("edge", "microsoft-edge", "msedge",
+                    tab_switch="press", close_by="key", key_window=True,
+                    window_hint="X", app_mode=True),
+}
+DEFAULT_BROWSER = BROWSERS["edge"]
+
+
+def browser_of(name) -> Browser:
+    key = str(name or DEFAULT_BROWSER.name).strip().lower()
+    if key not in BROWSERS:
+        raise ValueError(f"未知浏览器 {name!r}，可选：{', '.join(BROWSERS)}")
+    return BROWSERS[key]
+
+
 # ───────────────────────── 窗口：每轮一个，用完关掉 ─────────────────────────
 
 class WindowMismatch(RuntimeError):
@@ -57,119 +103,182 @@ class WindowMismatch(RuntimeError):
 
 @dataclass
 class Window:
-    """本轮自己开的那一个 Firefox 窗口。标题随页面变，所以只记窗口 id。"""
+    """本轮自己开的那一个窗口。标题随页面变，所以只记窗口 id。
+
+    Chromium 在页面加载期间会短暂换掉窗口 id，查标题时给几秒缓冲再下“窗口没了”的结论。
+    """
 
     id: str
+    browser: Browser = DEFAULT_BROWSER
 
     def title(self) -> str:
-        title = title_of(self.id)
+        title = title_of(self.id, browser=self.browser, timeout=3)
         if title is None:
             raise RuntimeError(f"本轮窗口 {self.id} 已经不在窗口列表里")
         return title
 
 
-def firefox_windows():
+def browser_windows(browser=DEFAULT_BROWSER):
     return [win for win in desk("windows")
-            if "firefox" in str(win.get("app", "")).lower()]
+            if browser.match in str(win.get("app", "")).lower()]
 
 
-def title_of(win_id, wins=None):
-    for win in (wins if wins is not None else firefox_windows()):
-        if win.get("id") == win_id:
-            return win.get("title") or ""
-    return None
-
-
-def wait_new_window(before, timeout=LOAD_TIMEOUT):
-    """等一个新的 Firefox 窗口出现；窗口列表里越靠后越新。"""
+def title_of(win_id, wins=None, browser=DEFAULT_BROWSER, timeout=0):
+    """窗口标题；timeout 内一直没出现才返回 None（Chromium 换 id 的空档）。"""
     deadline = time.time() + timeout
+    while True:
+        for win in (wins if wins is not None else browser_windows(browser)):
+            if win.get("id") == win_id:
+                return win.get("title") or ""
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.3)
+
+
+def wait_new_window(before, browser=DEFAULT_BROWSER, timeout=LOAD_TIMEOUT):
+    """等一个真正留下来的新窗口；列表里越靠后越新。
+
+    Chromium 启动时会把刚建的窗口换掉（旧 id 消失、新 id 接上），所以看到候选后要再确认一次
+    它还活着才交出去；“还原页面”这类对话框靠 window_hint 排掉。
+    """
+    deadline = time.time() + timeout
+    gone = set()
     while time.time() < deadline:
-        fresh = [win for win in firefox_windows()
-                 if win.get("id") not in before and (win.get("title") or "").strip()]
+        wins = browser_windows(browser)
+        before &= {w.get("id") for w in wins}
+        fresh = [w for w in wins
+                 if w.get("id") not in before and w.get("id") not in gone
+                 and (w.get("title") or "").strip()
+                 and browser.window_hint in (w.get("title") or "")]
         if fresh:
-            return fresh[-1]["id"]
+            candidate = fresh[-1]["id"]
+            time.sleep(1)
+            if candidate in {w.get("id") for w in browser_windows(browser)}:
+                return candidate
+            gone.add(candidate)           # 被换掉了，继续等下一个
         time.sleep(0.5)
-    raise RuntimeError(f"{timeout}s 内没有出现新的 Firefox 窗口")
+    raise RuntimeError(f"{timeout}s 内没有出现新的 {browser.name} 窗口")
 
 
-def open_window(url=START_URL, timeout=LOAD_TIMEOUT):
-    """开一个全新的 Firefox 窗口（只带这一个 x.com 标签），等帖子真的出现。"""
-    before = {win.get("id") for win in firefox_windows()}
-    desk("launch", "app=firefox", f'args=["--new-window","{url}"]')
-    win = Window(wait_new_window(before, timeout))
+def open_window(browser=DEFAULT_BROWSER, url=START_URL, timeout=LOAD_TIMEOUT):
+    """开一个全新的窗口（只带这一个 x.com 标签），等帖子真的出现。"""
+    before = {win.get("id") for win in browser_windows(browser)}
+    args = [f"--app={url}"] if browser.app_mode else ["--new-window", url]
+    desk("launch", f"app={browser.launch}", f"args={json.dumps(args)}")
+    win = Window(wait_new_window(before, browser, timeout), browser)
     try:
-        take_front(win)
+        take_front(win, browser)
         wait_loaded(win, timeout)
     except RuntimeError:
-        close_window(win)                 # 没加载出来也别把窗口留在桌面上
+        close_window(win, browser)        # 没加载出来也别把窗口留在桌面上
         raise
     return win
 
 
-def window_alive(win):
-    return title_of(win.id) is not None
+def window_alive(win, browser=DEFAULT_BROWSER):
+    return title_of(win.id, browser=browser) is not None
 
 
-def take_front(win):
-    """把本窗口带到最前，并确认按标题挑中的确实是它——不是就停手，别动别人的窗口。"""
-    title = win.title()
-    if not title.strip():
-        raise RuntimeError(f"本轮窗口 {win.id} 还没有标题，先别按标题操作")
-    picked = desk("snapshot", f"window={title}", "text=true", "max_chars=200")
-    got = (picked.get("window") or {}).get("id")
-    if got != win.id:
-        raise WindowMismatch(f"按标题挑到了另一个 Firefox 窗口（{got}），本轮窗口是 {win.id}")
-    desk("focus", f"window={title}")
+def take_front(win, browser=DEFAULT_BROWSER):
+    """把本窗口带到最前；按标题挑之前先确认挑中的就是它，不是就停手。
+
+    同名窗口时按标题操作一律落到“最前/最新”的那一个，所以先用 snapshot 看窗口 id：它挑中的
+    不是本轮窗口，就不发键盘、不滚轮，直接报错——用户的窗口不能动。
+    """
+    deadline = time.time() + 10
+    while True:
+        title = win.title()
+        if not title.strip():
+            raise RuntimeError(f"本轮窗口 {win.id} 还没有标题，先别按标题操作")
+        try:
+            picked = desk("snapshot", f"window={title}", "text=true", "max_chars=200")
+            got = (picked.get("window") or {}).get("id")
+            if got != win.id:
+                raise WindowMismatch(
+                    f"按标题挑到了另一个 {browser.name} 窗口（{got}），本轮窗口是 {win.id}")
+            desk("focus", f"window={title}")
+            return True
+        except RuntimeError as error:
+            if "no window" in str(error) and time.time() < deadline:
+                time.sleep(1)   # 标题刚变（Chromium 会在标题里补 profile 名），重读再试
+                continue
+            raise
 
 
-def wait_gone(win, timeout=10):
+def key_to(win, keys, browser=DEFAULT_BROWSER):
+    """按键落到本轮窗口：Firefox 按标题点名，Chromium 按焦点（调用方已确认前台是它）。"""
+    if browser.key_window:
+        desk("key", f"window={win.title()}", f"keys={keys}")
+    else:
+        desk("key", f"keys={keys}")
+
+
+def type_text(win, text, browser=DEFAULT_BROWSER):
+    if browser.key_window:
+        desk("type", f"window={win.title()}", f"text={text}")
+    else:
+        desk("type", f"text={text}")
+
+
+def send_key(win, keys, browser=DEFAULT_BROWSER):
+    """发按键前先确认前台是本轮窗口，再按各家的方式发。"""
+    take_front(win, browser)
+    key_to(win, keys, browser)
+
+
+def wait_gone(win, browser=DEFAULT_BROWSER, timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if not window_alive(win):
+        if not window_alive(win, browser):
             return True
         time.sleep(0.5)
-    return not window_alive(win)
+    return not window_alive(win, browser)
 
 
-def close_window(win, timeout=30):
-    """关掉本轮窗口：唯一标签一次 `ctrl+w` 即关窗；还剩标签就点它自己的关闭按钮。
+def close_window(win, browser=DEFAULT_BROWSER, timeout=30):
+    """关掉本轮窗口：Firefox 唯一标签一次 `ctrl+w` 即关窗，Edge 点它自己的关闭按钮。
 
     收尾这一步不抛异常：它多半跑在 finally 里，抛出去会盖掉真正的失败原因。
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not window_alive(win):
-            return True
+    if browser.close_by == "key" and window_alive(win, browser):
         try:
-            take_front(win)
-            desk("key", f"window={win.title()}", "keys=ctrl+w")
+            send_key(win, "ctrl+w", browser)
         except RuntimeError as error:
             print(f"warning: 关窗快捷键没发出去（{error}），改用窗口自己的关闭按钮",
                   file=sys.stderr)
-            break
-        if wait_gone(win, 10):
+        if wait_gone(win, browser, timeout):
             return True
-    if window_alive(win):
+    if window_alive(win, browser):
         try:
-            if click_close_button(win):
-                return wait_gone(win, 10)
+            if click_close_button(win, browser):
+                return wait_gone(win, browser, 10)
         except RuntimeError as error:
             print(f"warning: 点关闭按钮失败（{error}）", file=sys.stderr)
-    if window_alive(win):
+    if window_alive(win, browser):
         print(f"warning: 没能关掉本轮窗口 {win.id}", file=sys.stderr)
         return False
     return True
 
 
-def click_close_button(win, timeout=10):
-    """点这个窗口自己的关闭按钮：按节点 id，不按坐标，也不碰键盘焦点。"""
+TAB_CLOSE = {"close tab", "关闭标签页", "关闭此标签页"}
+WINDOW_CLOSE = {"close", "关闭", "close window", "关闭窗口"}
+
+
+def click_close_button(win, browser=DEFAULT_BROWSER, timeout=10):
+    """点这个窗口自己的关闭按钮：按节点 id，不按坐标，也不碰键盘焦点。
+
+    先点标签页的关闭按钮（只有一个标签时窗口随之关掉，Chromium 不会弹“关闭多个标签页”），
+    退而求其次才点窗口的关闭按钮。
+    """
     nodes = snapshot(win, chars=60000).get("nodes") or []
     by_ref = {node.get("ref"): node for node in nodes}
-    for node in nodes:
-        if node.get("role") != "button" or (node.get("name") or "").strip() != "Close":
-            continue
-        if not node.get("bounds"):
-            continue
+    candidates = [node for node in nodes
+                  if node.get("role") == "button" and node.get("bounds")
+                  and (node.get("name") or "").strip().lower() in TAB_CLOSE | WINDOW_CLOSE]
+    candidates.sort(key=lambda node: 0 if (node.get("name") or "").strip().lower()
+                    in TAB_CLOSE else 1)
+    for node in candidates:
+        bounds = node["bounds"]
         parent, chrome = node.get("parent"), False
         while parent not in (None, -1):
             ancestor = by_ref.get(parent)
@@ -182,32 +291,45 @@ def click_close_button(win, timeout=10):
                 chrome = True
                 break
             parent = ancestor.get("parent")
-        if chrome:
+        if chrome or bounds[1] < 60:          # 顶部那一排 chrome 按钮，不一定是 toolbar 的子节点
             desk("act", f"id={node['id']}", "action=click")
-            return wait_gone(win, timeout)
+            return wait_gone(win, browser, timeout)
     return False
 
 
 # ───────────────────────── Firefox / 时间线 ─────────────────────────
 
 
-def go_home(win):
+def go_home(win, browser=DEFAULT_BROWSER):
     """回到 Home；已经在这一页就不动。"""
     title = win.title()
     if is_home_title(title):
         return title
-    return open_url(win, START_URL)
+    return open_url(win, START_URL, browser)
 
 
-def open_url(win, url, timeout=40):
-    """在地址栏里打开一个页面，等当前文档真的换成新页再返回。"""
+def swap_window(win, url, browser=DEFAULT_BROWSER, timeout=LOAD_TIMEOUT):
+    """换一个窗口打开 url，再把旧的收掉；返回同一个 Window 对象（id 已指向新窗口）。
+
+    Chromium 的 app 窗口没有地址栏，换页面只能换窗口。调用的地方只持有一个 win，所以就地改 id，
+    不让每个调用点都去接新的返回值。
+    """
+    fresh = open_window(browser, url, timeout)
+    close_window(win, browser)
+    win.id = fresh.id
+    return win
+
+
+def open_url(win, url, browser=DEFAULT_BROWSER, timeout=40):
+    """打开一个页面，等当前文档真的换成新页再返回。"""
+    if browser.app_mode:
+        return swap_window(win, url, browser, timeout)
     before = document_name(snapshot(win).get("nodes") or [])
-    take_front(win)
-    title = win.title()
-    desk("key", f"window={title}", "keys=ctrl+l")
+    take_front(win, browser)
+    key_to(win, "ctrl+l", browser)
     time.sleep(0.5)
-    desk("type", f"window={title}", f"text={url}")
-    desk("key", f"window={title}", "keys=Return")
+    type_text(win, url, browser)
+    key_to(win, "Return", browser)
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(1)
@@ -342,7 +464,7 @@ def active_nodes(win):
     return under_document(nodes, ref) if ref is not None else nodes
 
 
-def select_tab(win, tab, timeout=40):
+def select_tab(win, tab, browser=DEFAULT_BROWSER, timeout=40):
     """选当前标签页里的页内时间线；点完要等内容真的换掉才算切到（选中态先出现、内容后到）。"""
     if not tab:
         return True
@@ -364,21 +486,24 @@ def select_tab(win, tab, timeout=40):
             elif now and now != before:           # 我们点的：内容换掉了才算切到
                 return True
         elif not clicked:
-            take_front(win)
-            desk("act", f"id={node['id']}", "action=click")
+            if browser.tab_switch == "press":     # Chromium 的 action=click 不切栏，press 才切
+                desk("press", f"id={node['id']}")
+            else:
+                take_front(win, browser)
+                desk("act", f"id={node['id']}", "action=click")
             clicked = True
         time.sleep(1.5)
     print(f"warning: 切不到时间线 {tab!r}", file=sys.stderr)
     return False
 
 
-def scroll_page(win, amount=8, direction="down", point=None):
+def scroll_page(win, browser=DEFAULT_BROWSER, amount=8, direction="down", point=None):
     """滚动正文：默认落在视口中间那条帖子上；point 可指定，用来换点重试。"""
     point = point or page_point(win)
     if point is None:
         return False
     x, y = point
-    take_front(win)                       # 先把自己带到最上层，滚轮才落在它身上
+    take_front(win, browser)               # 先把自己带到最上层，滚轮才落在它身上
     desk("scroll", f"direction={direction}", f"amount={amount}", f"x={x}", f"y={y}")
     return True
 
@@ -418,13 +543,16 @@ def page_point(win):
     return int(x + w / 2), int(y + h / 2)
 
 
-def page_down(win):
+def page_down(win, browser=DEFAULT_BROWSER):
     """滚轮没推动时的兜底：键盘翻页，走的是文档自己的滚动。"""
-    take_front(win)
+    if not browser.key_window:
+        return False
+    take_front(win, browser)
     desk("key", f"window={win.title()}", "keys=Page_Down")
+    return True
 
 
-def collect(win, screens, pause=3.5):
+def collect(win, screens, browser=DEFAULT_BROWSER, pause=3.5):
     """滚动读取时间线：每条只留一次并带上 permalink；连续两屏没有新帖就提前收工。"""
     seen = {}
     idle = 0
@@ -443,16 +571,16 @@ def collect(win, screens, pause=3.5):
         count = len(seen)
         if index == screens - 1 or idle >= 2:
             break
-        if not scroll_page(win):                  # 正文还没出来：等它，别把滚轮甩到导航上
+        if not scroll_page(win, browser):         # 正文还没出来：等它，别把滚轮甩到导航上
             wait_for_posts(win)
             time.sleep(1)
             continue
         time.sleep(pause)
         if first_post(win) == before_first:       # 滚轮被帖子里的东西吃掉：换正文中央，再不行键盘
-            scroll_page(win, point=feed_center())
+            scroll_page(win, browser, point=feed_center())
             time.sleep(pause)
             if first_post(win) == before_first:
-                page_down(win)
+                page_down(win, browser)
                 time.sleep(pause)
     return list(seen.values())
 
@@ -545,27 +673,30 @@ def parse_items(items: list[dict]) -> list[dict]:
             for item in items]
 
 
-def read_home(win: Window, tab: str = "", screens: int = 6) -> tuple[str, list[dict]]:
+def read_home(win: Window, tab: str = "", screens: int = 6,
+              browser=DEFAULT_BROWSER) -> tuple[str, list[dict]]:
     """在本轮窗口里回 Home，切到指定页内标签并读取帖子。"""
-    go_home(win)
-    select_tab(win, tab)
-    return win.title(), parse_items(collect(win, screens))
+    go_home(win, browser)
+    select_tab(win, tab, browser)
+    return win.title(), parse_items(collect(win, screens, browser))
 
 
-def read_account(win: Window, handle: str, screens: int = 6) -> tuple[str, list[dict]]:
+def read_account(win: Window, handle: str, screens: int = 6,
+                 browser=DEFAULT_BROWSER) -> tuple[str, list[dict]]:
     """在本轮窗口里打开某账号的主页时间线并读取帖子。"""
-    open_url(win, f"https://x.com/{handle_of(handle)}")
-    return win.title(), parse_items(collect(win, screens))
+    open_url(win, f"https://x.com/{handle_of(handle)}", browser)
+    return win.title(), parse_items(collect(win, screens, browser))
 
 
-def read_sections(win: Window, plan: list[tuple[str, str]], screens: int):
+def read_sections(win: Window, plan: list[tuple[str, str]], screens: int,
+                  browser=DEFAULT_BROWSER):
     sections: list[tuple[str, list[dict]]] = []
     for kind, value in plan:
         if kind == "tab":
-            _, posts = read_home(win, value, screens)
+            _, posts = read_home(win, value, screens, browser)
             sections.append((f"Home · {value}" if value else "Home", posts))
         else:
-            _, posts = read_account(win, value, screens)
+            _, posts = read_account(win, value, screens, browser)
             sections.append((f"@{handle_of(value)}", posts))
     return sections
 
@@ -627,13 +758,14 @@ def run(ctx: Ctx) -> list[Path]:
     if not ctx.due():
         return []
 
+    browser = browser_of(ctx.config.get("browser"))
     screens = int(ctx.config.get("screens", 6))
     plan = sections_of(ctx.config)
-    win = open_window()
+    win = open_window(browser)
     try:
-        sections = read_sections(win, plan, screens)
+        sections = read_sections(win, plan, screens, browser)
     finally:
-        close_window(win)                 # 抓到一半出错也把这一轮开的窗口收掉
+        close_window(win, browser)        # 抓到一半出错也把这一轮开的窗口收掉
 
     unique: dict[str, dict] = {}
     for label, posts in sections:
@@ -681,6 +813,8 @@ def main(argv: list[str] | None = None, config: dict | None = None) -> int:
                     help="账号时间线，如 @foo；可重复（默认取配置 accounts）")
     ap.add_argument("--screens", type=int, default=None,
                     help=f"每屏滚动次数（默认取配置，否则 {6}）")
+    ap.add_argument("--browser", choices=sorted(BROWSERS), default=None,
+                    help="用哪个浏览器抓（默认取配置，否则 edge）")
     ap.add_argument("--format", choices=("json", "md"), default="json")
     args = ap.parse_args(argv)
 
@@ -692,11 +826,12 @@ def main(argv: list[str] | None = None, config: dict | None = None) -> int:
     screens = args.screens if args.screens is not None else int(config.get("screens", 6))
     plan = [("tab", t) for t in tabs] + [("account", a) for a in accounts] or [("tab", "")]
 
-    win = open_window()
+    browser = browser_of(args.browser or config.get("browser"))
+    win = open_window(browser)
     try:
-        sections = read_sections(win, plan, screens)
+        sections = read_sections(win, plan, screens, browser)
     finally:
-        close_window(win)
+        close_window(win, browser)
 
     if args.format == "md":
         print(render_sections("X", sections))

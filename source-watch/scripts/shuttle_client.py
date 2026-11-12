@@ -11,6 +11,7 @@ from the host and from inside the container:
 
 Pick one with --transport or SHUTTLE_TRANSPORT; auto tries http, then docker, then local.
 """
+import base64
 import json
 import os
 import re
@@ -196,17 +197,29 @@ class Client:
     def name(self):
         return self.backend.name
 
-    def tool(self, name, arguments=None):
+    def call(self, name, arguments=None):
+        """One tool call: its JSON result and the images the reply carries.
+
+        A desk `shot` answers with a text part holding width/height and an `image` part holding
+        the PNG, so a caller that only reads the text loses the picture.
+        """
         result = self.backend.request("tools/call", {"name": name, "arguments": arguments or {}})
-        text = "".join(part.get("text", "") for part in result.get("content", []))
+        parts = result.get("content", [])
+        text = "".join(part.get("text", "") for part in parts)
         if result.get("isError"):
             raise RuntimeError(f"{name}: {text}")
+        images = [(part.get("mimeType") or "image/png", base64.b64decode(part["data"]))
+                  for part in parts if part.get("type") == "image" and part.get("data")]
         if not text:
-            return {}
+            return {}, images
         try:
-            return json.loads(text)
+            return json.loads(text), images
         except json.JSONDecodeError:
-            return {"text": text}
+            return {"text": text}, images
+
+    def tool(self, name, arguments=None):
+        data, _ = self.call(name, arguments)
+        return data
 
     def desk(self, verb, **args):
         """One desk verb; values keep the types the wire expects."""

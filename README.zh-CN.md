@@ -6,8 +6,8 @@
 
 - 桌面：XFCE4 跑在 TigerVNC 的 `Xvnc` 上（`:1`，默认 1280×800），没有 Wayland
 - 网页看画面：noVNC + websockify，`http://<host>:16080/`（自动连接 + 缩放适配）
-- 浏览器：Mozilla Firefox（官方 deb 源，Ubuntu 自带的是 snap 占位装不了），有 AT-SPI 树
-- 驱动层：[shuttle](https://github.com/loomhand/shuttle) v0.1.40，装于 `/opt/loomhand/shuttle`，`shuttle` 在 PATH
+- 浏览器：Mozilla Firefox（官方 deb 源，Ubuntu 自带的是 snap 占位装不了）和 Microsoft Edge（微软 apt 源），两者都有 AT-SPI 树
+- 驱动层：[shuttle](https://github.com/loomhand/shuttle) v0.1.48，装于 `/opt/loomhand/shuttle`，`shuttle` 在 PATH
 - 接入方式：MCP over HTTP，`http://127.0.0.1:8765/mcp`（容器内 `shuttle mcp --http`，Bearer token 鉴权）
 
 ## Quickstart
@@ -66,7 +66,7 @@ make mcp-test    # 握手冒烟
 | Firefox 无障碍树 | 可读：`desk find`/`desk press` 能命中并点击页面按钮 |
 | `desk key` + `desk type` 真实输入 | 输入 `https://example.com` 并回车，页面成功加载 |
 | `desk shot` | 1920×1080 PNG |
-| `POST http://127.0.0.1:8765/mcp` | 无 token 返回 401；带 Bearer 时 initialize（shuttle 0.1.40 / 协议 2025-06-18）、tools/list（8 个工具）、`gui_plan` 均正常 |
+| `POST http://127.0.0.1:8765/mcp` | 无 token 返回 401；带 Bearer 时 initialize（shuttle 0.1.48 / 协议 2025-06-18）、tools/list（8 个工具）、`gui_plan` 均正常 |
 | 容器重建后重连 | 不需要任何手工操作，下一次 MCP 调用直接成功 |
 | 容器健康检查 | `healthy`（就绪标记 + noVNC 200） |
 
@@ -192,7 +192,7 @@ docker build --build-arg SHUTTLE_RELEASE_BASE=https://ghfast.top/https://github.
 | ARG | 默认 | 说明 |
 |---|---|---|
 | `APT_MIRROR` | 官方源 | 换 apt 源，例如 `http://mirrors.ustc.edu.cn/ubuntu`（https 会自动降级为 http，因为基础镜像没有 CA 包；apt 靠 GPG 校验包，不依赖 TLS） |
-| `SHUTTLE_VERSION` | `0.1.40` | shuttle release 版本 |
+| `SHUTTLE_VERSION` | `0.1.48` | shuttle release 版本 |
 | `SHUTTLE_RELEASE_BASE` | GitHub releases | 下载基址，可指镜像/加速站 |
 | `USER_NAME` / `USER_UID` / `USER_GID` | `box` / `1000` / `1000` | 桌面用户 |
 
@@ -259,7 +259,14 @@ Firefox 的 cookie 和保存的密码都在卷里的 `/home/box/.mozilla/firefox
 
 ## 让浏览器走宿主机代理
 
-Firefox **不读** `http_proxy` / `HTTPS_PROXY`：镜像里的 `firefox` 包装脚本在每次启动时把 `BROWSER_PROXY` 写成 profile 的 `user.js`（`network.proxy.*`），所以改代理只要改环境变量、重启容器即可：
+两个浏览器都**不读** `http_proxy` / `HTTPS_PROXY`，都从环境变量拿 `BROWSER_PROXY`，各自由自己的包装脚本转成浏览器认识的配置。所以改代理 = 改环境变量 + 重启容器（桌面入口会把变量传给之后开的每个窗口）：
+
+| 浏览器 | 包装脚本 | 代理怎么写进去的 |
+|---|---|---|
+| Firefox | `/usr/local/bin/firefox` | 每次启动重写 profile 的 `user.js`（`network.proxy.*`） |
+| Edge | `/usr/local/bin/microsoft-edge` | 每次启动带 `--proxy-server` / `--proxy-bypass-list` |
+
+Edge 没有走 policy 文件：Chromium 的机器级 policy 目录（`/etc/opt/edge/policies`）归 root，桌面以 `box` 运行，只有启动时的包装脚本能读到环境变量。`BROWSER_NO_PROXY`（逗号分隔）会变成 Edge 的 bypass 列表，`localhost` 和 `127.0.0.1` 始终直连。
 
 ```bash
 docker run -d --name shuttle-box --network=host --shm-size=2g \
@@ -276,7 +283,7 @@ docker run -d --name shuttle-box --network=host --shm-size=2g \
 | 开了 Allow LAN / 监听 `0.0.0.0` | 用 `http://172.17.0.1:7890`，或 `--add-host=host.docker.internal:host-gateway` 后用 `host.docker.internal` | 不要 |
 | 只有 `127.0.0.1`，但不想用 host 网络 | 宿主机做一次转发：`docker run -d --name fwd --network=host alpine/socat TCP-LISTEN:7891,fork,reuseaddr TCP:127.0.0.1:7890`，容器里用 `http://172.17.0.1:7891` | 不要 |
 
-三种都实测过：host 网络下 `curl -x http://127.0.0.1:7890` 返回 200，Firefox 打开 `ifconfig.me` 显示代理出口 IP 且 new tab 天气组件显示洛杉矶；桥接网络直连 `172.17.0.1:7890` 返回 000；加上 socat 转发器后同一条命令返回 200。
+三种都实测过：host 网络下 `curl -x http://127.0.0.1:7890` 返回 200，Firefox 打开 `ifconfig.me` 显示代理出口 IP 且 new tab 天气组件显示洛杉矶，Edge 能打开 `https://www.google.com`；桥接网络直连 `172.17.0.1:7890` 返回 000；加上 socat 转发器后同一条命令返回 200。
 
 `--network=host` 的副作用要清楚：
 
@@ -419,7 +426,7 @@ shuttle 会真的操作桌面上的程序，这里的边界就是容器本身。
 
 - `shuttle stop` / `docker exec shuttle-box shuttle stop` 可随时停手，`shuttle resume` 恢复
 - Linux 后端目前**没有** kill 热键、指示器和 confirm 弹窗（只有 stop/resume、`script_run` 开关和白名单）
-- 浏览器不再需要 `--no-sandbox`：Firefox 的内容进程沙箱要建用户命名空间，Docker 默认 seccomp 会挡（`Failed to move to new namespace: Operation not permitted`），compose 里用 `security_opt: seccomp=unconfined` 放开，浏览器自身的沙箱正常生效
+- 两个浏览器都不需要 `--no-sandbox`：Firefox 的内容进程沙箱要建用户命名空间，Docker 默认 seccomp 会挡（`Failed to move to new namespace: Operation not permitted`），compose 里用 `security_opt: seccomp=unconfined` 放开，浏览器自身的沙箱正常生效
 - 代价是 seccomp 过滤对整个容器失效，不只是浏览器
 - Firefox 的首次运行弹窗（Terms of Use）用 profile 模板绕过，不用每次点
 
@@ -433,6 +440,7 @@ shuttle 会真的操作桌面上的程序，这里的边界就是容器本身。
 | `/usr/share/novnc` | noVNC 1.7（上游 tarball，非发行版包） |
 | `/opt/websockify` | websockify 的 venv（去掉发行版带来的 numpy/nodejs 依赖链） |
 | `/usr/local/bin/firefox` | Firefox 包装脚本（profile 播种、代理、语言、无障碍告警） |
+| `/usr/local/bin/microsoft-edge` | Edge 包装脚本（代理、首次运行弹窗、无障碍告警） |
 
 ## 排查
 
@@ -441,6 +449,8 @@ shuttle 会真的操作桌面上的程序，这里的边界就是容器本身。
 | 网页打不开 / 黑屏 | `docker exec shuttle-box tail -50 ~/.cache/box/logs/xvnc.log`；`docker exec shuttle-box cat ~/.cache/box/logs/supervisor.log` |
 | `desk windows` 返回空 | AT-SPI 没起来：`docker exec shuttle-box xprop -root AT_SPI_BUS` 应有值；再看 `xfce.log` |
 | Firefox 没有元素树 | 用 `firefox` 包装脚本（走桌面会话总线）启动，别用裸 `docker exec` 起，那样没有 `DBUS_SESSION_BUS_ADDRESS` |
+| Edge 没有元素树 | 同上：从桌面启动。裸 `docker exec` 起的 `msedge` 没有会话总线 |
+| Edge 打不开被墙的站点 | `docker exec shuttle-box ps -eo args \| grep '[m]sedge --'` 里必须有 `--proxy-server=`；没有说明不是经包装脚本起的，或者 `BROWSER_PROXY` 是空的 |
 | Firefox 卡在“Welcome to Firefox / Terms of Use”弹窗 | 确认 profile 里的 `user.js` 含 `termsofuse.acceptedDate` / `acceptedVersion` 两条（包装脚本每次启动重写） |
 | 画面显示但很慢 | `Xvnc` 无 GLX，浏览器走软件渲染；可调小 `SCREEN_GEOMETRY` |
 | 模型调用超时/失败 | 容器内 `curl -I $SHUTTLE_BASE_URL`；模型端点必须从容器内可达 |

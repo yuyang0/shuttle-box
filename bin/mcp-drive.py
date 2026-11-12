@@ -16,13 +16,11 @@ Usage:
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRANSPORT = os.path.join(REPO, "bin", "shuttle-mcp.sh")
-CONTAINER = os.environ.get("SHUTTLE_CONTAINER", "shuttle-box")
 
 
 sys.path.insert(0, os.path.join(REPO, "source-watch", "scripts"))
@@ -40,6 +38,9 @@ class MCP:
 
     def tool(self, name, arguments):
         return self.client.tool(name, arguments)
+
+    def call(self, name, arguments=None):
+        return self.client.call(name, arguments)
 
     def desk(self, verb, **args):
         return self.client.desk(verb, **args)
@@ -109,14 +110,21 @@ def main():
             now = browser_window(mcp, args.app)
             print(now["title"] if now else "n/a")
         elif args.cmd == "shot":
-            remote = f"/tmp/mcp-drive-{os.getpid()}.png"
-            kwargs = {"path": remote}
+            kwargs = {}
             if args.window:
                 kwargs["window"] = args.window
-            info = mcp.desk("shot", **kwargs)
+            # desk shot answers with width/height and the PNG as an image part of the reply;
+            # it takes no output path (shuttle 0.1.42 dropped the caller-supplied one).
+            info, images = mcp.call("desk", {"verb": "shot", "args": kwargs})
+            if not images:
+                raise SystemExit("desk shot returned no image")
             out = os.path.abspath(args.out)
-            subprocess.run(["docker", "cp", f"{CONTAINER}:{remote}", out], check=True)
-            print(f"{info['width']}x{info['height']} -> {out}")
+            parent = os.path.dirname(out)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(out, "wb") as handle:
+                handle.write(images[0][1])
+            print(f"{info.get('width')}x{info.get('height')} -> {out}")
     return 0
 
 

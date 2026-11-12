@@ -16,7 +16,7 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=
-ARG SHUTTLE_VERSION=0.1.41
+ARG SHUTTLE_VERSION=0.1.48
 # Point at a mirror when github.com is slow: e.g.
 #   --build-arg SHUTTLE_RELEASE_BASE=https://ghfast.top/https://github.com/loomhand/shuttle/releases/download
 ARG SHUTTLE_RELEASE_BASE=https://github.com/loomhand/shuttle/releases/download
@@ -125,6 +125,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     firefox --version
 
 # ---------------------------------------------------------------------------
+# Microsoft Edge from Microsoft's own apt repository: the desktop's Chromium, and what the
+# source-watch X module drives by default. Its `--app=` windows carry no address bar and
+# use the page name as the window title, so they never collide with the user's own Edge
+# window. Ubuntu's archive has no Edge package at all.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 \
+        https://packages.microsoft.com/keys/microsoft.asc \
+        | gpg --dearmor -o /etc/apt/keyrings/microsoft-edge.gpg; \
+    printf 'deb [arch=%s signed-by=/etc/apt/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main\n' "${arch}" \
+        > /etc/apt/sources.list.d/microsoft-edge.list; \
+    apt-get update -o Acquire::Retries=3; \
+    apt-get install -y --no-install-recommends microsoft-edge-stable; \
+    microsoft-edge --version
+
+# ---------------------------------------------------------------------------
 # WeChat: the official Linux client from Tencent's CDN. It bundles a Chromium runtime
 # (XWeb) and uses private libraries, but does not declare its runtime dependencies in
 # the control file, so the four it needs are installed before the package itself.
@@ -187,12 +207,15 @@ RUN set -eux; \
 COPY --chmod=0755 scripts/entrypoint.sh /opt/box/entrypoint.sh
 COPY --chmod=0755 scripts/start-desktop.sh /opt/box/start-desktop.sh
 COPY --chmod=0755 scripts/firefox.sh /usr/local/bin/firefox
+COPY --chmod=0755 scripts/microsoft-edge.sh /usr/local/bin/microsoft-edge
 COPY --chmod=0644 assets/firefox.desktop /opt/box/firefox.desktop
+COPY --chmod=0644 assets/microsoft-edge.desktop /opt/box/microsoft-edge.desktop
 COPY --chmod=0644 assets/policies.json /etc/firefox/policies/policies.json
 COPY --chmod=0644 assets/novnc-index.html /opt/box/novnc-index.html
 
 RUN set -eux; \
     install -m 0644 /opt/box/firefox.desktop /usr/share/applications/firefox.desktop; \
+    install -m 0644 /opt/box/microsoft-edge.desktop /usr/share/applications/microsoft-edge.desktop; \
     install -m 0644 /opt/box/novnc-index.html /usr/share/novnc/index.html; \
     install -m 0755 /opt/box/firefox.desktop "/home/${USER_NAME}/Desktop/firefox.desktop"; \
     chown -R "${USER_UID}:${USER_GID}" "/home/${USER_NAME}/Desktop"

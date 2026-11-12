@@ -2,10 +2,8 @@ services:
   box:
     build:
       context: .
-      args:
-        SHUTTLE_VERSION: "0.1.38"
-        # 国内构建时可换成任意 Ubuntu 镜像源，省下大半 apt 时间
-        # APT_MIRROR: "http://mirrors.ustc.edu.cn/ubuntu"
+      # 构建参数都在 Dockerfile 里（SHUTTLE_VERSION 也只住在那里）；换 apt 源或代理用
+      # `make build APT_MIRROR=… PROXY=…`，不要在这里再写一份，两处会各自漂移。
     image: ${IMAGE:-ghcr.io/yuyang0/shuttle-box}:${TAG:-latest}
     container_name: shuttle-box
     # Host networking so Firefox can reach a proxy that listens on the host's
@@ -39,7 +37,7 @@ services:
       # 127.0.0.1 keeps the viewer on this machine; set it to 0.0.0.0 (or empty)
       # when another machine has to open it
       - NOVNC_BIND=${NOVNC_BIND-127.0.0.1}
-      # browser proxy: Firefox ignores http_proxy, the launcher writes it into the profile
+      # browser proxy: both browsers ignore http_proxy; their launchers read it here
       - BROWSER_PROXY=${BROWSER_PROXY-http://127.0.0.1:7890}
       - BROWSER_NO_PROXY=${BROWSER_NO_PROXY:-}
     volumes:

@@ -7,8 +7,8 @@ outside the container drive it over MCP.
 
 - Desktop: XFCE4 on TigerVNC's `Xvnc` (`:1`, 1280×800 by default), no Wayland
 - Watch it: noVNC + websockify on `http://<host>:16080/` (auto-connect, scaled to the window)
-- Browser: Mozilla Firefox from Mozilla's own deb repository (Ubuntu's package is a snap stub), with an AT-SPI tree
-- Driver: [shuttle](https://github.com/loomhand/shuttle) v0.1.40 in `/opt/loomhand/shuttle`, `shuttle` on PATH
+- Browser: Mozilla Firefox from Mozilla's own deb repository (Ubuntu's package is a snap stub) and Microsoft Edge from Microsoft's apt repository, both exposing an AT-SPI tree
+- Driver: [shuttle](https://github.com/loomhand/shuttle) v0.1.48 in `/opt/loomhand/shuttle`, `shuttle` on PATH
 - Agent access: MCP over HTTP at `http://127.0.0.1:8765/mcp` (`shuttle mcp --http` inside the container, bearer token required)
 
 ## Quickstart
@@ -79,7 +79,7 @@ replaces the tag pulled from the registry. To keep the registry's `latest` untou
 | Firefox accessibility tree | readable: `desk find` / `desk press` hit and click page buttons |
 | `desk key` + `desk type` real input | typed `https://example.com` and pressed Return, the page loaded |
 | `desk shot` | PNG at the current screen size |
-| `POST http://127.0.0.1:8765/mcp` | 401 without a token; with the bearer token initialize (shuttle 0.1.40 / protocol 2025-06-18), tools/list (8 tools) and `gui_plan` all work |
+| `POST http://127.0.0.1:8765/mcp` | 401 without a token; with the bearer token initialize (shuttle 0.1.48 / protocol 2025-06-18), tools/list (8 tools) and `gui_plan` all work |
 | Reconnect after recreating the container | nothing to do by hand; the next MCP call succeeds |
 | Container health check | `healthy` (readiness marker + noVNC 200) |
 
@@ -211,7 +211,7 @@ Build arguments:
 | ARG | Default | Meaning |
 |---|---|---|
 | `APT_MIRROR` | upstream sources | swap the apt mirror, e.g. `http://mirrors.ustc.edu.cn/ubuntu` (https is downgraded to http because the base image has no CA package; apt verifies packages with GPG, not TLS) |
-| `SHUTTLE_VERSION` | `0.1.40` | shuttle release version |
+| `SHUTTLE_VERSION` | `0.1.48` | shuttle release version |
 | `SHUTTLE_RELEASE_BASE` | GitHub releases | download base, may point at a mirror or accelerator |
 | `USER_NAME` / `USER_UID` / `USER_GID` | `box` / `1000` / `1000` | the desktop user |
 
@@ -286,11 +286,21 @@ Other guarantees:
 
 - The Firefox launcher creates the profile only when the directory is absent and never overwrites an existing one; `entrypoint.sh` deletes just `lock` and `.parentlock`, never `cookies.sqlite`.
 
-## Sending the browser through a host proxy
+## Sending the browsers through a host proxy
 
-Firefox **does not read** `http_proxy` / `HTTPS_PROXY`. The `firefox` launcher writes
-`BROWSER_PROXY` into the profile's `user.js` (`network.proxy.*`) on every start, so changing
-the proxy is an environment change plus a container restart:
+Neither browser reads `http_proxy` / `HTTPS_PROXY`. Both take `BROWSER_PROXY` from the
+environment, each through its own launcher, so changing the proxy is an environment change plus
+a container restart (the desktop's entry point hands the variable to every window it starts):
+
+| Browser | Launcher | How the proxy is applied |
+|---|---|---|
+| Firefox | `/usr/local/bin/firefox` | written into the profile's `user.js` (`network.proxy.*`) on every start |
+| Edge | `/usr/local/bin/microsoft-edge` | `--proxy-server` / `--proxy-bypass-list` on every start |
+
+Edge has no policy file: Chromium's machine policy directory (`/etc/opt/edge/policies`) is
+root-owned and the desktop runs as `box`, so a wrapper is the only place that can read the
+environment at launch. `BROWSER_NO_PROXY` (comma separated) becomes Edge's bypass list;
+`localhost` and `127.0.0.1` are always bypassed.
 
 ```bash
 docker run -d --name shuttle-box --network=host --shm-size=2g \
@@ -307,9 +317,10 @@ The real obstacle is reachability, not browser configuration:
 | Allow LAN / listening on `0.0.0.0` | use `http://172.17.0.1:7890`, or `--add-host=host.docker.internal:host-gateway` and use `host.docker.internal` | no |
 | `127.0.0.1` only, but no host networking | forward on the host: `docker run -d --name fwd --network=host alpine/socat TCP-LISTEN:7891,fork,reuseaddr TCP:127.0.0.1:7890`, then use `http://172.17.0.1:7891` in the container | no |
 
-All three were measured: with host networking `curl -x http://127.0.0.1:7890` returns 200 and
-Firefox shows the proxy's exit IP on `ifconfig.me`; from a bridge container
-`172.17.0.1:7890` returns 000; behind the socat forwarder the same command returns 200.
+All three were measured: with host networking `curl -x http://127.0.0.1:7890` returns 200,
+Firefox shows the proxy's exit IP on `ifconfig.me`, and Edge loads `https://www.google.com`;
+from a bridge container `172.17.0.1:7890` returns 000; behind the socat forwarder the same
+command returns 200.
 
 Know the side effects of `--network=host`:
 
@@ -493,7 +504,7 @@ Other notes:
 
 - `shuttle stop` (or `docker exec shuttle-box shuttle stop`) halts work at once; `shuttle resume` lifts it.
 - The Linux backend has **no** kill hotkey, indicator or confirm dialog (only stop/resume, the `script_run` switch and the allowlist).
-- The browser needs no `--no-sandbox`: Firefox's content sandbox creates a user namespace, which Docker's default seccomp profile blocks (`Failed to move to new namespace: Operation not permitted`), so compose uses `security_opt: seccomp=unconfined` and the browser keeps its own sandbox.
+- Neither browser needs `--no-sandbox`: Firefox's content sandbox creates a user namespace, which Docker's default seccomp profile blocks (`Failed to move to new namespace: Operation not permitted`), so compose uses `security_opt: seccomp=unconfined` and each browser keeps its own sandbox.
 - The cost is that seccomp filtering is off for the whole container, not just the browser.
 - Firefox's first-run Terms of Use dialog is suppressed by prefs written at launch, so nobody has to click it.
 
@@ -509,6 +520,7 @@ Other notes:
 | `/usr/share/novnc` | noVNC 1.7 (upstream tarball, not a distro package) |
 | `/opt/websockify` | websockify's venv, avoiding the distro's numpy/nodejs dependency chain |
 | `/usr/local/bin/firefox` | Firefox launcher (proxy, language, accessibility warning) |
+| `/usr/local/bin/microsoft-edge` | Edge launcher (proxy, first-run dialogs, accessibility warning) |
 
 ## Troubleshooting
 
@@ -517,6 +529,8 @@ Other notes:
 | Page does not load / black screen | `docker exec shuttle-box tail -50 ~/.cache/box/logs/xvnc.log`; `docker exec shuttle-box cat ~/.cache/box/logs/supervisor.log` |
 | `desk windows` returns nothing | AT-SPI is not up: `docker exec shuttle-box xprop -root AT_SPI_BUS` should print a value; check `xfce.log` |
 | Firefox has no element tree | start it with the `firefox` launcher (it uses the desktop session bus); a bare `docker exec` start has no `DBUS_SESSION_BUS_ADDRESS` |
+| Edge has no element tree | same: launch it through the desktop. An `msedge` started by `docker exec` has no session bus |
+| Edge cannot reach a blocked site | `docker exec shuttle-box ps -eo args \| grep '[m]sedge --'` must show `--proxy-server=`; with none, the window was not started through the launcher, or `BROWSER_PROXY` is empty |
 | Firefox stops at the "Welcome to Firefox / Terms of Use" dialog | check that the profile's `user.js` has `termsofuse.acceptedDate` / `acceptedVersion` (the launcher rewrites it every start) |
 | Picture shows but is slow | `Xvnc` has no GLX, so the browser uses software rendering; try a smaller `SCREEN_GEOMETRY` |
 | Model calls time out or fail | `curl -I $SHUTTLE_BASE_URL` inside the container; the endpoint must be reachable from the container |

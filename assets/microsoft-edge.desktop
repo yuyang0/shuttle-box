@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Microsoft Edge
+Name[zh_CN]=Microsoft Edge 浏览器
+Comment=Edge with the proxy and accessibility tree configured for this desktop
+Exec=/usr/local/bin/microsoft-edge %U
+Icon=microsoft-edge
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=microsoft-edge

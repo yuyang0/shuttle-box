@@ -66,11 +66,11 @@ class XTests(ModuleCase):
         return True
 
     def feed(self, posts):
-        def fake_home(win, tab="", screens=6):
+        def fake_home(win, tab="", screens=6, browser=None):
             self.home_calls.append((tab, screens))
             return "Home / X", posts
 
-        def fake_account(win, handle, screens=6):
+        def fake_account(win, handle, screens=6, browser=None):
             self.account_calls.append((handle, screens))
             return "Beta / X", posts
 
@@ -93,8 +93,9 @@ class XTests(ModuleCase):
                     "text": "时间线里的新帖", "url": "https://x.com/G/status/333"}
         account_new = {"handle": "H", "author": "Hotel", "time": "now",
                        "text": "账号里的新帖", "url": "https://x.com/H/status/444"}
-        x.read_home = lambda win, tab="", screens=6: ("Home / X", POSTS + [home_new])
-        x.read_account = lambda win, handle, screens=6: ("Beta / X", POSTS + [account_new])
+        x.read_home = lambda win, tab="", screens=6, browser=None: ("Home / X", POSTS + [home_new])
+        x.read_account = lambda win, handle, screens=6, browser=None: ("Beta / X",
+                                                                      POSTS + [account_new])
         files = x.run(self.ctx("x", **config))
         self.assertEqual(len(files), 1)
         body = files[0].read_text()
@@ -184,18 +185,19 @@ class WindowLifecycleTests(ModuleCase):
                           "app": "firefox-bin"}]
 
         self.patch_desk(fake)
-        self.assertEqual(x.wait_new_window({"1.1/0"}, timeout=3), "1.1/1")
+        self.assertEqual(x.wait_new_window({"1.1/0"}, x.BROWSERS["firefox"], timeout=3),
+                         "1.1/1")
 
     def test_take_front_refuses_a_foreign_window(self):
         def fake(*args):
             if args[0] == "windows":
                 return [{"id": "1.1/1", "title": "Home / X — Mozilla Firefox",
                          "app": "firefox-bin"}]
-            return {"window": {"id": "1.1/9"}}
+            return {"window": {"id": "1.1/9"}}       # 按标题挑中的不是本轮窗口
 
         self.patch_desk(fake)
         with self.assertRaises(x.WindowMismatch):
-            x.take_front(x.Window("1.1/1"))
+            x.take_front(x.Window("1.1/1", x.BROWSERS["firefox"]), x.BROWSERS["firefox"])
 
     def test_close_window_sends_ctrl_w_until_the_window_is_gone(self):
         state = {"alive": True, "keys": []}
@@ -204,7 +206,7 @@ class WindowLifecycleTests(ModuleCase):
             verb = args[0]
             if verb == "windows":
                 return ([{"id": "1.1/1", "title": "Home / X — Mozilla Firefox",
-                          "app": "firefox-bin"}] if state["alive"] else [])
+                          "app": "firefox-bin", "active": True}] if state["alive"] else [])
             if verb == "snapshot":
                 return {"window": {"id": "1.1/1"}, "nodes": [], "text": ""}
             if verb == "key":
@@ -213,9 +215,120 @@ class WindowLifecycleTests(ModuleCase):
             return {"ok": True}
 
         self.patch_desk(fake)
-        self.assertTrue(x.close_window(x.Window("1.1/1")))
+        self.assertTrue(x.close_window(x.Window("1.1/1", x.BROWSERS["firefox"]),
+                                       x.BROWSERS["firefox"]))
         self.assertEqual(state["keys"],
                          [("key", "window=Home / X — Mozilla Firefox", "keys=ctrl+w")])
+
+    def test_browser_of_defaults_to_edge(self):
+        self.assertEqual(x.browser_of(None), x.BROWSERS["edge"])
+        self.assertEqual(x.browser_of("firefox"), x.BROWSERS["firefox"])
+        self.assertEqual(x.browser_of("Edge"), x.BROWSERS["edge"])
+        with self.assertRaises(ValueError):
+            x.browser_of("chrome")
+
+    def test_edge_ignores_the_restore_dialog(self):
+        def fake(*args):
+            if args[0] != "windows":
+                return {"ok": True}
+            return [{"id": "1.31/1", "title": "还原页面 - Microsoft Edge", "app": "msedge"},
+                    {"id": "1.31/2", "title": "Home / X - Microsoft Edge", "app": "msedge"}]
+
+        self.patch_desk(fake)
+        self.assertEqual(x.wait_new_window(set(), x.BROWSERS["edge"], timeout=6), "1.31/2")
+
+    def test_edge_addresses_its_app_window_by_title(self):
+        seen = []
+
+        def fake(*args):
+            seen.append(args)
+            if args[0] == "windows":
+                return [{"id": "1.31/1", "title": "Home / X", "app": "msedge"}]
+            return {"ok": True}
+
+        self.patch_desk(fake)
+        win = x.Window("1.31/1", x.BROWSERS["edge"])
+        x.key_to(win, "ctrl+l", x.BROWSERS["edge"])
+        x.type_text(win, "https://x.com/a", x.BROWSERS["edge"])
+        calls = [c for c in seen if c[0] != "windows"]
+        self.assertEqual(calls, [("key", "window=Home / X", "keys=ctrl+l"),
+                                 ("type", "window=Home / X", "text=https://x.com/a")])
+
+    def test_edge_opens_an_app_window(self):
+        seen = []
+        windows = [{"id": "1.31/1", "title": "Home / X", "app": "msedge"}]
+
+        def fake(*args):
+            seen.append(args)
+            verb = args[0]
+            if verb == "windows":
+                return [dict(w) for w in windows]
+            if verb == "launch":
+                windows.append({"id": "1.31/2", "title": "X", "app": "msedge"})
+                return {"ok": True}
+            if verb == "snapshot":
+                return {"window": {"id": "1.31/2"}, "text": "", "nodes": [
+                    {"ref": 1, "id": "1.31/2", "role": "window", "parent": -1},
+                    {"ref": 2, "id": "1.31/3", "role": "document",
+                     "name": "Home / X", "parent": 1, "focused": True,
+                     "showing": True},
+                ]}
+            return {"ok": True}
+
+        self.patch_desk(fake)
+        self.addCleanup(setattr, x, "wait_loaded", x.wait_loaded)
+        x.wait_loaded = lambda *a, **k: True       # 加载由 wait_loaded 自己的用例覆盖
+        x.open_window(x.BROWSERS["edge"], "https://x.com/home")
+        launches = [a for a in seen if a[0] == "launch"]
+        self.assertEqual(len(launches), 1)
+        self.assertIn("--app=https://x.com/home", launches[0][2])
+        self.assertNotIn("--new-window", launches[0][2])
+
+    def test_edge_closes_with_ctrl_w(self):
+        state = {"alive": True, "keys": []}
+
+        def fake(*args):
+            verb = args[0]
+            if verb == "windows":
+                return ([{"id": "1.31/1", "title": "Home / X", "app": "msedge"}]
+                        if state["alive"] else [])
+            if verb == "snapshot":
+                return {"window": {"id": "1.31/1"}, "text": "", "nodes": [
+                    {"ref": 1, "id": "1.31/1", "role": "window", "parent": -1},
+                ]}
+            if verb == "key":
+                state["keys"].append(args)
+                state["alive"] = False
+            return {"ok": True}
+
+        self.patch_desk(fake)
+        self.assertTrue(x.close_window(x.Window("1.31/1", x.BROWSERS["edge"]),
+                                       x.BROWSERS["edge"]))
+        self.assertIn("window=Home / X", state["keys"][0])
+
+    def test_edge_falls_back_to_its_own_close_button(self):
+        state = {"alive": True, "acts": []}
+
+        def fake(*args):
+            verb = args[0]
+            if verb == "windows":
+                return ([{"id": "1.31/1", "title": "Home / X - Microsoft Edge",
+                          "app": "msedge", "active": True}] if state["alive"] else [])
+            if verb == "snapshot":
+                return {"window": {"id": "1.31/1"}, "text": "", "nodes": [
+                    {"ref": 1, "id": "1.31/1", "role": "window", "parent": -1},
+                    {"ref": 2, "id": "1.31/2", "role": "toolbar", "parent": 1},
+                    {"ref": 3, "id": "1.31/3", "role": "button", "name": "Close",
+                     "parent": 2, "bounds": [1250, 4, 26, 24]},
+                ]}
+            if verb == "act":
+                state["acts"].append(args)
+                state["alive"] = False
+            return {"ok": True}
+
+        self.patch_desk(fake)
+        self.assertTrue(x.close_window(x.Window("1.31/1"), x.BROWSERS["edge"]))
+        self.assertEqual(state["acts"], [("act", "id=1.31/3", "action=click")])
 
     def test_active_document_skips_a_stray_new_tab(self):
         nodes = [
